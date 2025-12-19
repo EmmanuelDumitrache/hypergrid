@@ -1,0 +1,10 @@
+ui/node_modules/
+node_modules/
+venv/
+__pycache__/
+*.pyc
+logs/
+.DS_Store
+*.log
+state.json
+config.json

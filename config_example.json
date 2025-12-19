@@ -1,0 +1,33 @@
+{
+    "wallet": {
+        "secret_key": "YOUR_PRIVATE_KEY_HERE",
+        "account_address": "YOUR_ACCOUNT_ADDRESS_HERE"
+    },
+    "grid": {
+        "pair": "SOL",
+        "capital": 500.0,
+        "leverage": 1.5,
+        "grids": 25,
+        "spacing_pct": 0.002,
+        "buffer_pct": 0.30,
+        "mode": "neutral"
+    },
+    "safety": {
+        "max_drawdown_pct": 0.10,
+        "daily_loss_limit_usd": 50.0,
+        "min_margin_ratio": 1.5,
+        "max_adverse_funding_rate": 0.001,
+        "email_alerts": {
+            "enabled": false,
+            "smtp_server": "smtp.gmail.com",
+            "smtp_port": 587,
+            "sender_email": "your_email@gmail.com",
+            "sender_password": "your_app_password",
+            "recipient_email": "alert_recipient@example.com"
+        }
+    },
+    "system": {
+        "log_level": "INFO",
+        "log_file": "logs/bot.log"
+    }
+}

@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  api:
+    build: .
+    container_name: hypergrid_api
+    restart: always
+    volumes:
+      - ./logs:/app/logs
+      - ./config.json:/app/config.json
+      # We mount the source code to allow hot edits if needed? 
+      # Better not to for immutable infrastructure, but config.json is essential.
+    environment:
+      - HYPERLIQUID_PRIVATE_KEY=${HYPERLIQUID_PRIVATE_KEY}
+
+  ui:
+    # Build UI via Node image first or multi-stage?
+    # For simplicity in this prompt, we assume we just serve build artifacts via Nginx?
+    # Or run vite in dev mode? No, production.
+    # Let's use a standard node builder pattern or just build locally.
+    # To be "Production Ready" we should use a multi-stage Nginx build.
+    build: 
+        context: ./ui
+        dockerfile: Dockerfile
+    container_name: hypergrid_ui
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+
