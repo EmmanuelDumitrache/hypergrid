@@ -19,12 +19,17 @@ class GridManager:
         # Get Precision from Info
         self.sz_decimals = 2 # Default safe for SOL
         self.px_decimals = 2 # Default safe for SOL
+        self.tick_size = 0.001  # Default for SOL/USD
         
         try:
              # If exchange has info attached or we pass it
              pass 
         except:
              pass
+
+    def round_to_tick(self, price):
+        """Round price to nearest tick size"""
+        return round(price / self.tick_size) * self.tick_size
 
     def set_precision(self, sz_decimals, px_decimals):
         self.sz_decimals = sz_decimals
@@ -72,7 +77,34 @@ class GridManager:
                 price = current_price * (1 + (self.spacing * i))
                 sell_levels.append(price)
             
+            
+        # Round all levels to tick size
+        buy_levels = [self.round_to_tick(p) for p in buy_levels]
+        sell_levels = [self.round_to_tick(p) for p in sell_levels]
+        
         return sorted(buy_levels), sorted(sell_levels)
+
+    def calculate_volatility_range(self, current_price, high_24h, low_24h):
+        """
+        Calculate and set range based on 24h volatility.
+        Logic: Range = min(Volatility * 2, 10%)
+        """
+        if current_price <= 0:
+            return
+            
+        vol_24h = (high_24h - low_24h) / current_price if current_price > 0 else 0.03
+        
+        # Safe default if vol is zero or crazy
+        if vol_24h <= 0: vol_24h = 0.01
+        
+        # Conservative: 2x daily volatility
+        range_pct = min(vol_24h * 2, 0.10)  # Max 10% range
+        if range_pct < 0.02: range_pct = 0.02 # Min 2% range
+        
+        self.min_price = self.round_to_tick(current_price * (1 - range_pct))
+        self.max_price = self.round_to_tick(current_price * (1 + range_pct))
+        
+        logger.info(f"AUTO-RANGE Recalculated: ${self.min_price:.3f} - ${self.max_price:.3f} (Vol: {vol_24h*100:.1f}%)")
 
     def place_initial_orders(self, current_price):
         """

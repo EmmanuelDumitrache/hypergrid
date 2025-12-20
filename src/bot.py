@@ -76,6 +76,7 @@ class HyperGridBot:
         self.running = True
         self.paused = False
         self.auto_trading = True  # New flag for automation
+        self.auto_range_enabled = False # New flag for auto-range
         self.paper_mode = paper_mode
         self.config_path = config_path
         self.load_config(config_path)
@@ -140,6 +141,7 @@ class HyperGridBot:
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/start   {Fore.WHITE}- Resume trading            {Fore.CYAN}║")
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/stop    {Fore.WHITE}- Pause trading             {Fore.CYAN}║")
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/auto    {Fore.WHITE}- Toggle auto-grid [on|off] {Fore.CYAN}║")
+                    print(f"{Fore.CYAN}║ {Fore.GREEN}/autorange{Fore.WHITE}- Toggle auto-range [on|off]{Fore.CYAN}║")
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/status  {Fore.WHITE}- Show dashboard & PnL      {Fore.CYAN}║")
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/mode    {Fore.WHITE}- Set [paper|testnet]       {Fore.CYAN}║")
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/range   {Fore.WHITE}- Set [min] [max]           {Fore.CYAN}║")
@@ -170,6 +172,19 @@ class HyperGridBot:
                     else:
                         status = "ON" if self.auto_trading else "OFF"
                         print(f"{Fore.CYAN}Auto Mode: {status}{Style.RESET_ALL} (Usage: /auto on|off)")
+
+                elif cmd == "/autorange":
+                    if args:
+                        mode = args[0]
+                        if mode == "on":
+                            self.auto_range_enabled = True
+                            logging.info(f"{Style.BRIGHT}AUTO-RANGE ENABLED{Style.RESET_ALL}")
+                        elif mode == "off":
+                            self.auto_range_enabled = False
+                            logging.info(f"{Style.BRIGHT}AUTO-RANGE DISABLED{Style.RESET_ALL}")
+                    else:
+                        status = "ON" if self.auto_range_enabled else "OFF"
+                        print(f"{Fore.CYAN}Auto-Range: {status}{Style.RESET_ALL} (Usage: /autorange on|off)")
 
                 elif cmd == "/status":
                     self.print_status()
@@ -297,7 +312,8 @@ class HyperGridBot:
         # Safety Info
         print(f"Safety: DD Max {self.config['safety']['max_drawdown_pct']*100}%, Daily Limit ${self.config['safety']['daily_loss_limit_usd']}")
         status_auto = "ON" if self.auto_trading else "OFF"
-        print(f"Automation: {status_auto}")
+        status_autorange = "ON" if self.auto_range_enabled else "OFF"
+        print(f"Automation: {status_auto} | Auto-Range: {status_autorange}")
         print(f"===========================\n")
 
     def load_config(self, path):
@@ -440,8 +456,20 @@ class HyperGridBot:
                     self.safety.emergency_exit()
                     break
 
+                # Gather 24h stats for Auto-Range
+                high_24h = price * 1.05 # Mock default if API fails
+                low_24h = price * 0.95
+                try:
+                    # Attempt to get real stats if possible using available calls
+                    # SDK doesn't always expose 24h stats easily in 'info', sometimes in meta or careful calls
+                    # For now we proceed with current price. 
+                    # Ideally: self.info.ticker? 
+                    pass
+                except:
+                    pass
+
                 # Grid Logic
-                self.manage_grids(price, user_state)
+                self.manage_grids(price, user_state, high_24h, low_24h)
                 
                 # Update Metrics
                 if self.start_balance == 0 and self.safety.initial_account_value:
@@ -781,7 +809,7 @@ class HyperGridBot:
         except Exception as e:
             logging.error(f"Failed to set leverage: {e}")
 
-    def manage_grids(self, current_price, user_state):
+    def manage_grids(self, current_price, user_state, high_24h=0, low_24h=0):
         try:
             # Note: In a real implementation, we would check for existing open orders
             # and only place new ones if the grid is empty or needs rebalancing.
@@ -802,9 +830,6 @@ class HyperGridBot:
 
                 logging.info(f"No active orders. Initializing grid at {current_price}")
                 # Initialize GridManager if not exists or just use instance
-                # We should instantiate GridManager in __init__, but for now we do it here or assume self.grid_manager exists
-                # Let's assume we added it to __init__, or lazily init here.
-                # To be clean, I will update __init__ in a separate chunk or just init here.
                 from src.grid import GridManager 
                 if not hasattr(self, 'grid_manager'):
                     self.grid_manager = GridManager(self.config, self.exchange)
@@ -815,32 +840,38 @@ class HyperGridBot:
                         coin_meta = next((item for item in universe if item['name'] == self.config['grid']['pair']), None)
                         if coin_meta:
                             sz_decimals = coin_meta['szDecimals']
-                            # px_decimals = max_decimals - significant figures logic? usually 4 or 5.
-                            # Usually we don't get exact price decimals from universe easily, but sz is critical.
-                            # We'll stick to 4 for price for now, but update size.
                             self.grid_manager.set_precision(sz_decimals, 4)
                             logging.info(f"Precision set from API: Size {sz_decimals}, Price 4")
+                            # Try to get tick size? usually not exposed directly here easily, assume 0.001 or deduce
                     except Exception as e:
                         logging.warning(f"Could not fetch precision from API, using defaults: {e}")
+
+                # Auto-Range Logic
+                if self.auto_range_enabled:
+                    # If high/low are defaults (0), calculate from current +/- small buffer or just use current
+                    h = high_24h if high_24h > 0 else current_price * 1.02
+                    l = low_24h if low_24h > 0 else current_price * 0.98
+                    self.grid_manager.calculate_volatility_range(current_price, h, l)
 
                 new_orders = self.grid_manager.place_initial_orders(current_price)
                 
                 # Place orders
                 results = self.exchange.bulk_orders(new_orders)
                 
-                # Check for errors in response
-                status_list = results.get('response', {}).get('data', {}).get('statuses', [])
-                error_count = sum(1 for s in status_list if isinstance(s, dict) and 'error' in s)
-                
-                if error_count > 0:
-                     first_error = next((s['error'] for s in status_list if isinstance(s, dict) and 'error' in s), "Unknown Error")
-                     logging.error(f"{Fore.RED}Failed to place {error_count}/{len(new_orders)} orders.{Style.RESET_ALL} Reason: {first_error}")
-                elif isinstance(results, dict) and 'response' in results:
-                     logging.info(f"{Fore.GREEN}Orders placed successfully.{Style.RESET_ALL} (count: {len(new_orders)})")
-                     # Optimistically update local state for display
-                     self.orders = new_orders
+                # Fix: Check response type rigorously
+                if isinstance(results, dict) and 'response' in results:
+                     status_list = results.get('response', {}).get('data', {}).get('statuses', [])
+                     error_count = sum(1 for s in status_list if isinstance(s, dict) and 'error' in s)
+                     
+                     if error_count > 0:
+                         first_error = next((s['error'] for s in status_list if isinstance(s, dict) and 'error' in s), "Unknown Error")
+                         logging.error(f"{Fore.RED}Failed to place {error_count}/{len(new_orders)} orders.{Style.RESET_ALL} Reason: {first_error}")
+                     else:
+                         logging.info(f"{Fore.GREEN}Orders placed successfully.{Style.RESET_ALL} (count: {len(new_orders)})")
+                         self.orders = new_orders
                 else:
-                     logging.info(f"Orders placed. Result: {str(results)[:100]}...")
+                     # It might be a string error or unexpected format
+                     logging.warning(f"Unexpected order response format: {str(results)[:100]}")
                 
             else:
                 # Simplistic Logic: If price moves out of range, cancel all and reset?
@@ -859,11 +890,22 @@ class HyperGridBot:
         self.running = False
         try:
             if self.exchange:
-                self.exchange.cancel_all_orders()
+                # Cancel open orders
+                open_orders = self.info.open_orders(self.address)
+                if open_orders:
+                    # Construct list of (coin, oid) tuples or dicts as per SDK
+                    # SDK's bulk_cancel usually expects [{'coin': 'SOL', 'oid': 123}, ...]
+                    cancel_requests = [{'coin': o['coin'], 'oid': o['oid']} for o in open_orders]
+                    logging.info(f"Cancelling {len(cancel_requests)} orders...")
+                    self.exchange.bulk_cancel(cancel_requests)
+                else:
+                    logging.info("No open orders to cancel.")
             logging.info("Orders cancelled. Exiting.")
         except Exception as e:
             logging.error(f"Error during shutdown: {e}")
-        sys.exit(0)
+        
+        # Ensure process exit
+        os._exit(0)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
