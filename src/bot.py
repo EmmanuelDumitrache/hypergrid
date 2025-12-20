@@ -680,7 +680,13 @@ class HyperGridBot:
                 
                 # Place orders
                 results = self.exchange.bulk_orders(new_orders)
-                logging.info(f"Orders placed. Result: {results}")
+                
+                # Concise logging
+                status_list = results.get('response', {}).get('data', {}).get('statuses', [])
+                if isinstance(results, dict) and 'response' in results:
+                     logging.info(f"{Fore.GREEN}Orders placed successfully.{Style.RESET_ALL} (count: {len(new_orders)})")
+                else:
+                     logging.info(f"Orders placed. Result: {str(results)[:100]}...") # Truncate if unknown format
                 
             else:
                 # Simplistic Logic: If price moves out of range, cancel all and reset?
