@@ -75,6 +75,7 @@ class HyperGridBot:
     def __init__(self, config_path, paper_mode=False):
         self.running = True
         self.paused = False
+        self.auto_trading = True  # New flag for automation
         self.paper_mode = paper_mode
         self.load_config(config_path)
         
@@ -134,6 +135,7 @@ class HyperGridBot:
                     print(f"╠════════════════════════════════════╣{Style.RESET_ALL}")
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/start   {Fore.WHITE}- Resume trading            {Fore.CYAN}║")
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/stop    {Fore.WHITE}- Pause trading             {Fore.CYAN}║")
+                    print(f"{Fore.CYAN}║ {Fore.GREEN}/auto    {Fore.WHITE}- Toggle auto-grid (on/off) {Fore.CYAN}║")
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/status  {Fore.WHITE}- Show dashboard & PnL      {Fore.CYAN}║")
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/quit    {Fore.WHITE}- Shutdown bot              {Fore.CYAN}║")
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/commands{Fore.WHITE}- Show this help menu       {Fore.CYAN}║")
@@ -149,6 +151,20 @@ class HyperGridBot:
                     
                 elif cmd == "/status":
                     self.print_status()
+                    
+                elif cmd.startswith("/auto"):
+                    parts = cmd.split()
+                    if len(parts) > 1:
+                        mode = parts[1].lower()
+                        if mode == "on":
+                            self.auto_trading = True
+                            logging.info(f"{Style.BRIGHT}AUTOMATION ENABLED{Style.RESET_ALL}")
+                        elif mode == "off":
+                            self.auto_trading = False
+                            logging.info(f"{Style.BRIGHT}AUTOMATION DISABLED{Style.RESET_ALL}")
+                    else:
+                        status = "ON" if self.auto_trading else "OFF"
+                        print(f"{Fore.CYAN}Auto Mode: {status}{Style.RESET_ALL} (Usage: /auto on|off)")
                     
                 elif cmd == "/quit":
                     print(f"{Fore.RED}Shutting down...{Style.RESET_ALL}")
@@ -594,6 +610,7 @@ class HyperGridBot:
                 "margin_ratio": margin_ratio,
                 "account_value": account_value,
                 "equity": account_value,
+                "auto_trading": self.auto_trading,
                 
                 # PnL Metrics
                 "pnl": pnl,
@@ -667,6 +684,10 @@ class HyperGridBot:
             self.orders = open_orders # Sync state
             
             if not open_orders:
+                if not self.auto_trading:
+                    # If auto is off, don't place initial orders
+                    return
+
                 logging.info(f"No active orders. Initializing grid at {current_price}")
                 # Initialize GridManager if not exists or just use instance
                 # We should instantiate GridManager in __init__, but for now we do it here or assume self.grid_manager exists
@@ -675,6 +696,20 @@ class HyperGridBot:
                 from src.grid import GridManager 
                 if not hasattr(self, 'grid_manager'):
                     self.grid_manager = GridManager(self.config, self.exchange)
+                    # Attempt to get precision from SDK meta
+                    try:
+                        meta = self.info.meta()
+                        universe = meta.get('universe', [])
+                        coin_meta = next((item for item in universe if item['name'] == self.config['grid']['pair']), None)
+                        if coin_meta:
+                            sz_decimals = coin_meta['szDecimals']
+                            # px_decimals = max_decimals - significant figures logic? usually 4 or 5.
+                            # Usually we don't get exact price decimals from universe easily, but sz is critical.
+                            # We'll stick to 4 for price for now, but update size.
+                            self.grid_manager.set_precision(sz_decimals, 4)
+                            logging.info(f"Precision set from API: Size {sz_decimals}, Price 4")
+                    except Exception as e:
+                        logging.warning(f"Could not fetch precision from API, using defaults: {e}")
 
                 new_orders = self.grid_manager.place_initial_orders(current_price)
                 

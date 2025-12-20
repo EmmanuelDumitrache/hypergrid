@@ -11,6 +11,20 @@ class GridManager:
         self.spacing = config['grid']['spacing_pct']
         self.leverage = config['grid']['leverage']
         self.active_orders = []
+        
+        # Get Precision from Info
+        self.sz_decimals = 2 # Default safe for SOL
+        self.px_decimals = 2 # Default safe for SOL
+        
+        try:
+             # If exchange has info attached or we pass it
+             pass 
+        except:
+             pass
+
+    def set_precision(self, sz_decimals, px_decimals):
+        self.sz_decimals = sz_decimals
+        self.px_decimals = px_decimals
 
     def calculate_levels(self, current_price):
         """
@@ -78,13 +92,15 @@ class GridManager:
         # Place Buys
         for price in buy_levels:
             sz_coin = size_per_grid_usd / price
-            # Round logic for Hyperliquid (api usually handles or need util)
-            # We'll use formatting .4f for now
+            # Round using dynamic precision
+            sz_fmt = f"{{:.{self.sz_decimals}f}}"
+            px_fmt = f"{{:.{self.px_decimals}f}}"
+            
             order = {
                 'coin': self.config['grid']['pair'],
                 'is_buy': True,
-                'sz': float(f"{sz_coin:.4f}"),
-                'limit_px': float(f"{price:.4f}"),
+                'sz': float(sz_fmt.format(sz_coin)),
+                'limit_px': float(px_fmt.format(price)),
                 'order_type': {'limit': {'tif': 'Gtc'}},
                 'reduce_only': False
             }
@@ -93,11 +109,15 @@ class GridManager:
         # Place Sells
         for price in sell_levels:
             sz_coin = size_per_grid_usd / price
+            
+            sz_fmt = f"{{:.{self.sz_decimals}f}}"
+            px_fmt = f"{{:.{self.px_decimals}f}}"
+
             order = {
                 'coin': self.config['grid']['pair'],
                 'is_buy': False,
-                'sz': float(f"{sz_coin:.4f}"),
-                'limit_px': float(f"{price:.4f}"),
+                'sz': float(sz_fmt.format(sz_coin)),
+                'limit_px': float(px_fmt.format(price)),
                 'order_type': {'limit': {'tif': 'Gtc'}},
                 'reduce_only': False
             }
