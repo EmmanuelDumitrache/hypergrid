@@ -7,7 +7,13 @@ import signal
 import argparse
 import tempfile
 import shutil
+import threading
+from colorama import init, Fore, Style
 from datetime import datetime
+
+# Initialize colorama
+init(autoreset=True)
+
 
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -22,18 +28,33 @@ try:
 except ImportError:
     pass
 
-# Setup Logging
+# Setup Logging with Colors
+class ColoredFormatter(logging.Formatter):
+    FORMATS = {
+        logging.DEBUG: Fore.CYAN + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL,
+        logging.INFO: Fore.GREEN + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL,
+        logging.WARNING: Fore.YELLOW + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL,
+        logging.ERROR: Fore.RED + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL,
+        logging.CRITICAL: Fore.RED + Style.BRIGHT + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL
+    }
+
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt, datefmt='%Y-%m-%d | %H:%M:%S')
+        return formatter.format(record)
+
 def setup_logging(config):
     log_file = config['system']['log_file']
     os.makedirs(os.path.dirname(log_file), exist_ok=True)
     
-    formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s', datefmt='%Y-%m-%d | %H:%M:%S')
-    
+    # File handler (plain text)
+    file_formatter = logging.Formatter('%(asctime)s | %(levelname)s | %(message)s', datefmt='%Y-%m-%d | %H:%M:%S')
     file_handler = logging.FileHandler(log_file)
-    file_handler.setFormatter(formatter)
+    file_handler.setFormatter(file_formatter)
     
+    # Console handler (colored)
     console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
+    console_handler.setFormatter(ColoredFormatter())
     
     logger = logging.getLogger()
     logger.setLevel(config['system'].get('log_level', 'INFO'))
@@ -47,6 +68,7 @@ def setup_logging(config):
 class HyperGridBot:
     def __init__(self, config_path, paper_mode=False):
         self.running = True
+        self.paused = False
         self.paper_mode = paper_mode
         self.load_config(config_path)
         
@@ -70,6 +92,59 @@ class HyperGridBot:
         # Register Signal Handler
         signal.signal(signal.SIGINT, self.shutdown)
         signal.signal(signal.SIGTERM, self.shutdown)
+
+        # Start Command Listener
+        self.cmd_thread = threading.Thread(target=self.command_listener, daemon=True)
+        self.cmd_thread.start()
+
+    def command_listener(self):
+        """Listens for CLI commands in a background thread"""
+        print(f"{Fore.CYAN}Interactive CLI Active. Type /help for commands.{Style.RESET_ALL}")
+        while self.running:
+            try:
+                cmd = input()
+                if not cmd.startswith("/"):
+                    continue
+                
+                cmd = cmd.strip().lower()
+                if cmd == "/help":
+                    print(f"{Fore.YELLOW}=== HyperGridBot Commands ==={Style.RESET_ALL}")
+                    print(f"{Fore.GREEN}/start {Style.RESET_ALL}- Resume trading")
+                    print(f"{Fore.GREEN}/stop  {Style.RESET_ALL}- Pause trading (maintains orders)")
+                    print(f"{Fore.GREEN}/status{Style.RESET_ALL}- Show bot status & PnL")
+                    print(f"{Fore.GREEN}/quit  {Style.RESET_ALL}- Shutdown bot")
+                
+                elif cmd == "/stop":
+                    self.paused = True
+                    logging.warning("Bot PAUSED by user command.")
+                
+                elif cmd == "/start":
+                    self.paused = False
+                    logging.info("Bot RESUMED by user command.")
+                    
+                elif cmd == "/status":
+                    self.print_status()
+                    
+                elif cmd == "/quit":
+                    self.shutdown(None, None)
+                    break
+                    
+                else:
+                    print(f"{Fore.RED}Unknown command. Type /help{Style.RESET_ALL}")
+            except EOFError:
+                break
+            except Exception as e:
+                logging.error(f"Command error: {e}")
+
+    def print_status(self):
+        print(f"\n{Fore.CYAN}=== HyperGridBot Status ==={Style.RESET_ALL}")
+        print(f"Status: {Fore.RED + 'PAUSED' if self.paused else Fore.GREEN + 'RUNNING'}{Style.RESET_ALL}")
+        print(f"Mode: {'PAPER' if self.paper_mode else 'LIVE'}")
+        print(f"Pair: {self.config.get('grid', {}).get('pair', 'N/A')}")
+        print(f"Balance: ${self.current_balance:.2f}")
+        print(f"PnL: {Fore.GREEN if (self.current_balance - self.start_balance) >= 0 else Fore.RED}${self.current_balance - self.start_balance:.2f}{Style.RESET_ALL}")
+        print(f"Active Grids: {len(self.orders)}")
+        print(f"===========================\n")
 
     def load_config(self, path):
         with open(path, 'r') as f:
@@ -128,6 +203,9 @@ class HyperGridBot:
             try:
                 # Sync loop frequency
                 time.sleep(10) # 10s tick
+
+                if self.paused:
+                    continue
 
                 # Check SDK Init
                 if not self.info:
