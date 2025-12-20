@@ -681,12 +681,19 @@ class HyperGridBot:
                 # Place orders
                 results = self.exchange.bulk_orders(new_orders)
                 
-                # Concise logging
+                # Check for errors in response
                 status_list = results.get('response', {}).get('data', {}).get('statuses', [])
-                if isinstance(results, dict) and 'response' in results:
+                error_count = sum(1 for s in status_list if isinstance(s, dict) and 'error' in s)
+                
+                if error_count > 0:
+                     first_error = next((s['error'] for s in status_list if isinstance(s, dict) and 'error' in s), "Unknown Error")
+                     logging.error(f"{Fore.RED}Failed to place {error_count}/{len(new_orders)} orders.{Style.RESET_ALL} Reason: {first_error}")
+                elif isinstance(results, dict) and 'response' in results:
                      logging.info(f"{Fore.GREEN}Orders placed successfully.{Style.RESET_ALL} (count: {len(new_orders)})")
+                     # Optimistically update local state for display
+                     self.orders = new_orders
                 else:
-                     logging.info(f"Orders placed. Result: {str(results)[:100]}...") # Truncate if unknown format
+                     logging.info(f"Orders placed. Result: {str(results)[:100]}...")
                 
             else:
                 # Simplistic Logic: If price moves out of range, cancel all and reset?
