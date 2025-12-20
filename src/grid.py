@@ -12,6 +12,10 @@ class GridManager:
         self.leverage = config['grid']['leverage']
         self.active_orders = []
         
+        # Manual Range Mode
+        self.min_price = None
+        self.max_price = None
+        
         # Get Precision from Info
         self.sz_decimals = 2 # Default safe for SOL
         self.px_decimals = 2 # Default safe for SOL
@@ -26,30 +30,47 @@ class GridManager:
         self.sz_decimals = sz_decimals
         self.px_decimals = px_decimals
 
+    def set_manual_range(self, min_price, max_price):
+        """Set manual Fixed Range"""
+        self.min_price = min_price
+        self.max_price = max_price
+
     def calculate_levels(self, current_price):
         """
-        Calculate grid levels around current price.
-        25 grids total. 
-        If neutral: 12 buys below, 12 sells above? Or 25 buys if aiming to long?
-        Spec: "Pair: SOL/USD perpetuals ... 25 grids ... around current price"
-        Usually implies Neutral Grid.
+        Calculate grid levels.
+        If min_price and max_price are set, use Fixed Range (Arithmetic).
+        Else, use Spread-based around current_price.
         """
-        # Half grids on each side
-        half_grids = self.num_grids // 2
-        
         buy_levels = []
         sell_levels = []
-        
-        # Calculate levels relative to current price
-        # Buy levels: Price * (1 - spacing * i)
-        for i in range(1, half_grids + 1):
-            price = current_price * (1 - (self.spacing * i))
-            buy_levels.append(price)
+
+        if self.min_price and self.max_price:
+            # Fixed Range Arithmetic Grid
+            # range = max - min
+            # step = range / grids
+            step = (self.max_price - self.min_price) / self.num_grids
             
-        # Sell levels: Price * (1 + spacing * i)
-        for i in range(1, half_grids + 1):
-            price = current_price * (1 + (self.spacing * i))
-            sell_levels.append(price)
+            # Generate all levels from min to max
+            all_levels = [self.min_price + (step * i) for i in range(self.num_grids + 1)]
+            
+            # Split into buy/sell based on current price
+            # Levels below current are Buys, above are Sells
+            buy_levels = [l for l in all_levels if l < current_price]
+            sell_levels = [l for l in all_levels if l > current_price]
+            
+        else:
+            # Existing Spread Logic
+            half_grids = self.num_grids // 2
+            
+            # Buy levels: Price * (1 - spacing * i)
+            for i in range(1, half_grids + 1):
+                price = current_price * (1 - (self.spacing * i))
+                buy_levels.append(price)
+                
+            # Sell levels: Price * (1 + spacing * i)
+            for i in range(1, half_grids + 1):
+                price = current_price * (1 + (self.spacing * i))
+                sell_levels.append(price)
             
         return sorted(buy_levels), sorted(sell_levels)
 

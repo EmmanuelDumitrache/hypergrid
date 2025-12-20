@@ -77,6 +77,7 @@ class HyperGridBot:
         self.paused = False
         self.auto_trading = True  # New flag for automation
         self.paper_mode = paper_mode
+        self.config_path = config_path
         self.load_config(config_path)
         
         # Setup Logger
@@ -123,11 +124,14 @@ class HyperGridBot:
         print(f"\n{Fore.CYAN}{Style.BRIGHT}>>> Interactive CLI Active.{Style.RESET_ALL} {Fore.CYAN}Type /commands for help.{Style.RESET_ALL}\n")
         while self.running:
             try:
-                cmd = input()
-                if not cmd.startswith("/"):
+                cmd_raw = input()
+                if not cmd_raw.startswith("/"):
                     continue
                 
-                cmd = cmd.strip().lower()
+                # Split command and args
+                parts = cmd_raw.strip().lower().split()
+                cmd = parts[0]
+                args = parts[1:]
                 
                 if cmd in ["/help", "/commands"]:
                     print(f"\n{Fore.CYAN}{Style.BRIGHT}╔════════════════════════════════════╗")
@@ -135,10 +139,15 @@ class HyperGridBot:
                     print(f"╠════════════════════════════════════╣{Style.RESET_ALL}")
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/start   {Fore.WHITE}- Resume trading            {Fore.CYAN}║")
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/stop    {Fore.WHITE}- Pause trading             {Fore.CYAN}║")
-                    print(f"{Fore.CYAN}║ {Fore.GREEN}/auto    {Fore.WHITE}- Toggle auto-grid (on/off) {Fore.CYAN}║")
+                    print(f"{Fore.CYAN}║ {Fore.GREEN}/auto    {Fore.WHITE}- Toggle auto-grid [on|off] {Fore.CYAN}║")
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/status  {Fore.WHITE}- Show dashboard & PnL      {Fore.CYAN}║")
+                    print(f"{Fore.CYAN}║ {Fore.GREEN}/mode    {Fore.WHITE}- Set [paper|testnet]       {Fore.CYAN}║")
+                    print(f"{Fore.CYAN}║ {Fore.GREEN}/range   {Fore.WHITE}- Set [min] [max]           {Fore.CYAN}║")
+                    print(f"{Fore.CYAN}║ {Fore.GREEN}/risk    {Fore.WHITE}- Set risk params           {Fore.CYAN}║")
+                    print(f"{Fore.CYAN}║ {Fore.GREEN}/save    {Fore.WHITE}- Save config to disk       {Fore.CYAN}║")
+                    print(f"{Fore.CYAN}║ {Fore.GREEN}/reload  {Fore.WHITE}- Reload config from disk   {Fore.CYAN}║")
+                    print(f"{Fore.CYAN}║ {Fore.GREEN}/panic   {Fore.WHITE}- STOP & CANCEL ALL         {Fore.CYAN}║")
                     print(f"{Fore.CYAN}║ {Fore.GREEN}/quit    {Fore.WHITE}- Shutdown bot              {Fore.CYAN}║")
-                    print(f"{Fore.CYAN}║ {Fore.GREEN}/commands{Fore.WHITE}- Show this help menu       {Fore.CYAN}║")
                     print(f"{Fore.CYAN}╚════════════════════════════════════╝{Style.RESET_ALL}\n")
                 
                 elif cmd == "/stop":
@@ -148,14 +157,10 @@ class HyperGridBot:
                 elif cmd == "/start":
                     self.paused = False
                     logging.info(f"{Style.BRIGHT}BOT RESUMED{Style.RESET_ALL} by user command.")
-                    
-                elif cmd == "/status":
-                    self.print_status()
-                    
-                elif cmd.startswith("/auto"):
-                    parts = cmd.split()
-                    if len(parts) > 1:
-                        mode = parts[1].lower()
+                
+                elif cmd == "/auto":
+                    if args:
+                        mode = args[0]
                         if mode == "on":
                             self.auto_trading = True
                             logging.info(f"{Style.BRIGHT}AUTOMATION ENABLED{Style.RESET_ALL}")
@@ -165,7 +170,102 @@ class HyperGridBot:
                     else:
                         status = "ON" if self.auto_trading else "OFF"
                         print(f"{Fore.CYAN}Auto Mode: {status}{Style.RESET_ALL} (Usage: /auto on|off)")
-                    
+
+                elif cmd == "/status":
+                    self.print_status()
+
+                elif cmd == "/panic":
+                    logging.critical(f"{Fore.RED}PANIC TRIGGERED BY USER!{Style.RESET_ALL}")
+                    self.paused = True
+                    self.safety.emergency_exit()
+                    logging.info("Bot paused. use /start to resume (careful!).")
+
+                elif cmd == "/save":
+                    try:
+                        with open(self.config_path, 'w') as f:
+                            json.dump(self.config, f, indent=4)
+                        logging.info(f"{Fore.GREEN}Configuration saved to {self.config_path}{Style.RESET_ALL}")
+                    except Exception as e:
+                        logging.error(f"Failed to save config: {e}")
+
+                elif cmd == "/reload":
+                    try:
+                        self.load_config(self.config_path)
+                        # Re-apply safety settings
+                        if hasattr(self, 'safety'):
+                            self.safety.update_config(self.config)
+                        # Re-apply grid settings
+                        if hasattr(self, 'grid_manager'):
+                             # Update grid config reference if needed, usually passed by reference but good to be safe
+                             self.grid_manager.config = self.config
+                             # Should we reset manual range? User might expect config values.
+                             # If config has no manual range, maybe reset?
+                             # For now, we trust loading config updates known keys.
+                        logging.info(f"{Fore.GREEN}Configuration reloaded.{Style.RESET_ALL}")
+                    except Exception as e:
+                        logging.error(f"Failed to reload config: {e}")
+
+                elif cmd == "/mode":
+                    if args:
+                        target = args[0]
+                        if target == "paper":
+                            self.paper_mode = True
+                            # Re-init SDK
+                            self.setup_sdk()
+                        elif target == "testnet":
+                            self.paper_mode = True # Testnet is paper logic in this bot for now
+                            self.config['wallet']['base_url'] = "https://api.hyperliquid-testnet.xyz"
+                            self.setup_sdk()
+                        elif target == "mainnet":
+                            # Caution
+                            # self.paper_mode = False
+                            # self.setup_sdk()
+                            logging.warning("Switching to Mainnet not fully enabled in this CLI version for safety.")
+                        else:
+                            print("Usage: /mode [paper|testnet]")
+                    else:
+                        print(f"Current Mode: {'PAPER' if self.paper_mode else 'LIVE'}")
+
+                elif cmd == "/range":
+                    if len(args) >= 2:
+                        try:
+                            min_p = float(args[0])
+                            max_p = float(args[1])
+                            
+                            # Set in config
+                            # We don't have standard keys for this in config.json yet, but can add runtime keys
+                            # Better: Set on grid_manager directly
+                            if hasattr(self, 'grid_manager'):
+                                self.grid_manager.set_manual_range(min_p, max_p)
+                                logging.info(f"Manual Range Set: {min_p} - {max_p}")
+                                # Clear existing orders to force rebuild?
+                                # self.orders = [] 
+                                # But we need to cancel first?
+                                # Let's just set it, main loop will see 'No active orders' if we clear?
+                                # Ideally: /stop -> /range -> /start
+                        except ValueError:
+                             print("Usage: /range [min] [max]")
+                    else:
+                        # Show current
+                        if hasattr(self, 'grid_manager'):
+                             print(f"Range: {self.grid_manager.min_price} - {self.grid_manager.max_price}")
+                        else:
+                             print("Grid Manager not initialized.")
+
+                elif cmd == "/risk":
+                    if len(args) >= 2:
+                        key = args[0]
+                        val = args[1]
+                        if key == "dd":
+                            self.config['safety']['max_drawdown_pct'] = float(val)
+                        elif key == "daily":
+                            self.config['safety']['daily_loss_limit_usd'] = float(val)
+                        
+                        self.safety.update_config(self.config)
+                        logging.info(f"Risk Updated: {key}={val}")
+                    else:
+                        print(f"Risk Params: DD={self.config['safety']['max_drawdown_pct']}, Daily={self.config['safety']['daily_loss_limit_usd']}")
+
                 elif cmd == "/quit":
                     print(f"{Fore.RED}Shutting down...{Style.RESET_ALL}")
                     self.shutdown(None, None)
@@ -183,9 +283,21 @@ class HyperGridBot:
         print(f"Status: {Fore.RED + 'PAUSED' if self.paused else Fore.GREEN + 'RUNNING'}{Style.RESET_ALL}")
         print(f"Mode: {'PAPER' if self.paper_mode else 'LIVE'}")
         print(f"Pair: {self.config.get('grid', {}).get('pair', 'N/A')}")
+        
+        # Range Info
+        if hasattr(self, 'grid_manager') and self.grid_manager.min_price:
+             print(f"Range: Manual ({self.grid_manager.min_price} - {self.grid_manager.max_price})")
+        else:
+             print(f"Range: Auto/Spread ({self.config['grid'].get('spacing_pct',0)*100:.2f}% spacing)")
+
         print(f"Balance: ${self.current_balance:.2f}")
         print(f"PnL: {Fore.GREEN if (self.current_balance - self.start_balance) >= 0 else Fore.RED}${self.current_balance - self.start_balance:.2f}{Style.RESET_ALL}")
         print(f"Active Grids: {len(self.orders)}")
+        
+        # Safety Info
+        print(f"Safety: DD Max {self.config['safety']['max_drawdown_pct']*100}%, Daily Limit ${self.config['safety']['daily_loss_limit_usd']}")
+        status_auto = "ON" if self.auto_trading else "OFF"
+        print(f"Automation: {status_auto}")
         print(f"===========================\n")
 
     def load_config(self, path):
