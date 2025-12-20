@@ -31,16 +31,17 @@ except ImportError:
 # Setup Logging with Colors
 class ColoredFormatter(logging.Formatter):
     FORMATS = {
-        logging.DEBUG: Fore.CYAN + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL,
-        logging.INFO: Fore.GREEN + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL,
-        logging.WARNING: Fore.YELLOW + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL,
-        logging.ERROR: Fore.RED + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL,
-        logging.CRITICAL: Fore.RED + Style.BRIGHT + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL
+        logging.DEBUG: Fore.CYAN + Style.DIM + "%(asctime)s" + Style.RESET_ALL + " | " + Fore.CYAN + "%(levelname)-8s" + Style.RESET_ALL + " | " + Fore.CYAN + "%(message)s" + Style.RESET_ALL,
+        logging.INFO: Fore.WHITE + Style.DIM + "%(asctime)s" + Style.RESET_ALL + " | " + Fore.GREEN + Style.BRIGHT + "%(levelname)-8s" + Style.RESET_ALL + " | " + Fore.WHITE + "%(message)s" + Style.RESET_ALL,
+        logging.WARNING: Fore.YELLOW + Style.DIM + "%(asctime)s" + Style.RESET_ALL + " | " + Fore.YELLOW + Style.BRIGHT + "%(levelname)-8s" + Style.RESET_ALL + " | " + Fore.YELLOW + "%(message)s" + Style.RESET_ALL,
+        logging.ERROR: Fore.RED + Style.DIM + "%(asctime)s" + Style.RESET_ALL + " | " + Fore.RED + Style.BRIGHT + "%(levelname)-8s" + Style.RESET_ALL + " | " + Fore.RED + "%(message)s" + Style.RESET_ALL,
+        logging.CRITICAL: Fore.RED + Style.BRIGHT + "%(asctime)s" + Style.RESET_ALL + " | " + Fore.RED + Style.BRIGHT + "%(levelname)-8s" + Style.RESET_ALL + " | " + Fore.RED + Style.BRIGHT + "%(message)s" + Style.RESET_ALL
     }
 
     def format(self, record):
         log_fmt = self.FORMATS.get(record.levelno)
-        formatter = logging.Formatter(log_fmt, datefmt='%Y-%m-%d | %H:%M:%S')
+        # Simplify date format to just Time
+        formatter = logging.Formatter(log_fmt, datefmt='%H:%M:%S')
         return formatter.format(record)
 
 def setup_logging(config):
@@ -58,6 +59,11 @@ def setup_logging(config):
     
     logger = logging.getLogger()
     logger.setLevel(config['system'].get('log_level', 'INFO'))
+    
+    # Silence noisy libraries
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
     # Clean existing handlers
     logger.handlers = []
     logger.addHandler(file_handler)
@@ -80,14 +86,28 @@ class HyperGridBot:
         
         # Grid State
         self.orders = []
+        self.previous_orders = []  # Track previous orders to detect fills
         self.current_range_bottom = 0
         self.current_range_top = 0
         
         # Metrics
         self.total_trades = 0
         self.recent_trades = [] # List of timestamps
+        self.trade_history = []  # List of trade dicts: {timestamp, price, size, side, pnl}
         self.start_balance = 0
         self.current_balance = 0
+        self.start_of_day_balance = 0
+        self.start_of_week_balance = 0
+        self.current_day = datetime.utcnow().date()
+        self.current_week = datetime.utcnow().isocalendar()[1]
+        
+        # Cached API data (to reduce API calls)
+        self.cached_funding_rate = None
+        self.cached_funding_rate_time = 0
+        self.cached_meta = None
+        self.cached_meta_time = 0
+        self.cached_order_history = None
+        self.cached_order_history_time = 0
         
         # Register Signal Handler
         signal.signal(signal.SIGINT, self.shutdown)
@@ -99,7 +119,7 @@ class HyperGridBot:
 
     def command_listener(self):
         """Listens for CLI commands in a background thread"""
-        print(f"{Fore.CYAN}Interactive CLI Active. Type /help for commands.{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}{Style.BRIGHT}>>> Interactive CLI Active.{Style.RESET_ALL} {Fore.CYAN}Type /commands for help.{Style.RESET_ALL}\n")
         while self.running:
             try:
                 cmd = input()
@@ -107,30 +127,36 @@ class HyperGridBot:
                     continue
                 
                 cmd = cmd.strip().lower()
-                if cmd == "/help":
-                    print(f"{Fore.YELLOW}=== HyperGridBot Commands ==={Style.RESET_ALL}")
-                    print(f"{Fore.GREEN}/start {Style.RESET_ALL}- Resume trading")
-                    print(f"{Fore.GREEN}/stop  {Style.RESET_ALL}- Pause trading (maintains orders)")
-                    print(f"{Fore.GREEN}/status{Style.RESET_ALL}- Show bot status & PnL")
-                    print(f"{Fore.GREEN}/quit  {Style.RESET_ALL}- Shutdown bot")
+                
+                if cmd in ["/help", "/commands"]:
+                    print(f"\n{Fore.CYAN}{Style.BRIGHT}╔════════════════════════════════════╗")
+                    print(f"║       HYPERGRID BOT COMMANDS       ║")
+                    print(f"╠════════════════════════════════════╣{Style.RESET_ALL}")
+                    print(f"{Fore.CYAN}║ {Fore.GREEN}/start   {Fore.WHITE}- Resume trading            {Fore.CYAN}║")
+                    print(f"{Fore.CYAN}║ {Fore.GREEN}/stop    {Fore.WHITE}- Pause trading             {Fore.CYAN}║")
+                    print(f"{Fore.CYAN}║ {Fore.GREEN}/status  {Fore.WHITE}- Show dashboard & PnL      {Fore.CYAN}║")
+                    print(f"{Fore.CYAN}║ {Fore.GREEN}/quit    {Fore.WHITE}- Shutdown bot              {Fore.CYAN}║")
+                    print(f"{Fore.CYAN}║ {Fore.GREEN}/commands{Fore.WHITE}- Show this help menu       {Fore.CYAN}║")
+                    print(f"{Fore.CYAN}╚════════════════════════════════════╝{Style.RESET_ALL}\n")
                 
                 elif cmd == "/stop":
                     self.paused = True
-                    logging.warning("Bot PAUSED by user command.")
+                    logging.warning(f"{Style.BRIGHT}BOT PAUSED{Style.RESET_ALL} by user command.")
                 
                 elif cmd == "/start":
                     self.paused = False
-                    logging.info("Bot RESUMED by user command.")
+                    logging.info(f"{Style.BRIGHT}BOT RESUMED{Style.RESET_ALL} by user command.")
                     
                 elif cmd == "/status":
                     self.print_status()
                     
                 elif cmd == "/quit":
+                    print(f"{Fore.RED}Shutting down...{Style.RESET_ALL}")
                     self.shutdown(None, None)
                     break
                     
                 else:
-                    print(f"{Fore.RED}Unknown command. Type /help{Style.RESET_ALL}")
+                    print(f"{Fore.RED}Unknown command: {cmd}{Style.RESET_ALL}")
             except EOFError:
                 break
             except Exception as e:
@@ -182,9 +208,9 @@ class HyperGridBot:
         
         base_url = None # Default mainnet
         if self.paper_mode:
-             # If paper mode is supported by SDK, usually strict separate URL
-             # base_url = constants.TESTNET_API_URL
-             logging.info("Initializing in PAPER MODE")
+             # Use testnet API URL for paper trading
+             base_url = "https://api.hyperliquid-testnet.xyz"
+             logging.info("Initializing in PAPER MODE (using testnet API)")
              
         self.info = Info(base_url=base_url, skip_ws=True)
         self.exchange = Exchange(account, base_url=base_url, account_address=self.address)
@@ -214,8 +240,27 @@ class HyperGridBot:
 
                 # Fetch User State & Market Data
                 user_state = self.info.user_state(self.address)
+                logging.debug(f"User state response: {user_state}")
                 margin_summary = user_state.get('marginSummary', {})
+                logging.debug(f"Margin summary: {margin_summary}")
+                
+                # Get account value - in Hyperliquid, accountValue represents total account value
+                # When no positions: accountValue = totalRawUsd (available USDC)
+                # When positions exist: accountValue = totalRawUsd + unrealized PnL
                 account_value = float(margin_summary.get('accountValue', 0))
+                total_raw_usd = float(margin_summary.get('totalRawUsd', 0))
+                withdrawable = float(user_state.get('withdrawable', 0))
+                
+                # Use accountValue as primary, fallback to totalRawUsd or withdrawable
+                if account_value == 0:
+                    if total_raw_usd > 0:
+                        account_value = total_raw_usd
+                        logging.info(f"Using totalRawUsd as account value: ${account_value:.2f}")
+                    elif withdrawable > 0:
+                        account_value = withdrawable
+                        logging.info(f"Using withdrawable as account value: ${account_value:.2f}")
+                
+                logging.info(f"Detected account value: ${account_value:.2f} USDC (rawUsd: ${total_raw_usd:.2f}, withdrawable: ${withdrawable:.2f})")
                 
                 # Fetch Price
                 all_mids = self.info.all_mids()
@@ -273,85 +318,320 @@ class HyperGridBot:
                 # Update Metrics
                 if self.start_balance == 0 and self.safety.initial_account_value:
                     self.start_balance = self.safety.initial_account_value
+                    self.start_of_day_balance = self.start_balance
+                    self.start_of_week_balance = self.start_balance
                 
                 self.current_balance = account_value
                 pnl = self.current_balance - self.start_balance
                 active_orders = len(self.orders)
                 self.update_live_log(pnl, price, active_orders)
                 
-                # Export State for UI
-                self.export_state(pnl, price, active_orders)
+                # Export State for UI - pass user_state to avoid re-fetching
+                self.export_state(pnl, price, active_orders, user_state)
 
             except Exception as e:
                 logging.error(f"Error in main loop: {e}", exc_info=True)
                 time.sleep(5)
 
-    def export_state(self, pnl, current_price, active_orders):
+    def _detect_fills(self, previous_orders, current_orders, current_price):
+        """Detect order fills by comparing previous and current open orders"""
+        try:
+            if not previous_orders:
+                return
+            
+            # Create sets of order IDs for comparison
+            prev_order_ids = {order.get('oid', order.get('id', '')) for order in previous_orders}
+            curr_order_ids = {order.get('oid', order.get('id', '')) for order in current_orders}
+            
+            # Find filled orders (in previous but not in current)
+            filled_order_ids = prev_order_ids - curr_order_ids
+            
+            if filled_order_ids:
+                # Find the filled order details
+                for order in previous_orders:
+                    order_id = order.get('oid', order.get('id', ''))
+                    if order_id in filled_order_ids:
+                        # Record the fill
+                        now = time.time()
+                        self.total_trades += 1
+                        self.recent_trades.append(now)
+                        
+                        # Extract order details
+                        side = "BUY" if order.get('side') == 'B' or order.get('side') == 'A' else "SELL"
+                        price = float(order.get('limitPx', order.get('price', current_price)))
+                        size = float(order.get('sz', order.get('size', 0)))
+                        
+                        # Store trade history
+                        self.trade_history.append({
+                            'timestamp': now,
+                            'price': price,
+                            'size': size,
+                            'side': side,
+                            'pnl': 0.0  # Will be calculated when position closes
+                        })
+                        
+                        logging.info(f"Order filled: {side} {size} @ ${price:.2f}")
+                        
+        except Exception as e:
+            logging.error(f"Error detecting fills: {e}")
+
+    def _calculate_trade_analytics(self):
+        """Calculate trade analytics from trade history"""
+        try:
+            now = time.time()
+            trades_24h = [t for t in self.trade_history if now - t['timestamp'] < 86400]
+            
+            if not trades_24h:
+                return {
+                    'win_rate': 0.0,
+                    'avg_trade_size': 0.0,
+                    'largest_win': 0.0,
+                    'largest_loss': 0.0,
+                    'profit_factor': 0.0
+                }
+            
+            # Calculate win rate from closed positions (for now, use all trades)
+            # In future, we'd track realized PnL per trade
+            wins = [t for t in trades_24h if t.get('pnl', 0) > 0]
+            losses = [t for t in trades_24h if t.get('pnl', 0) < 0]
+            
+            win_rate = (len(wins) / len(trades_24h) * 100) if trades_24h else 0.0
+            avg_trade_size = sum(t['size'] for t in trades_24h) / len(trades_24h) if trades_24h else 0.0
+            
+            pnls = [t.get('pnl', 0) for t in trades_24h]
+            largest_win = max(pnls) if pnls and max(pnls) > 0 else 0.0
+            largest_loss = min(pnls) if pnls and min(pnls) < 0 else 0.0
+            
+            total_wins = sum(t.get('pnl', 0) for t in wins) if wins else 0.0
+            total_losses = abs(sum(t.get('pnl', 0) for t in losses)) if losses else 0.0
+            profit_factor = (total_wins / total_losses) if total_losses > 0 else (total_wins if total_wins > 0 else 0.0)
+            
+            return {
+                'win_rate': win_rate,
+                'avg_trade_size': avg_trade_size,
+                'largest_win': largest_win,
+                'largest_loss': largest_loss,
+                'profit_factor': profit_factor
+            }
+        except Exception as e:
+            logging.error(f"Error calculating trade analytics: {e}")
+            return {
+                'win_rate': 0.0,
+                'avg_trade_size': 0.0,
+                'largest_win': 0.0,
+                'largest_loss': 0.0,
+                'profit_factor': 0.0
+            }
+
+    def export_state(self, pnl, current_price, active_orders, user_state=None):
         """Export bot state to JSON for Dashboard"""
         try:
-            # Clean old trades (>24h)
             now = time.time()
-            self.recent_trades = [t for t in self.recent_trades if now - t < 86400]
             
-            # Fetch Real Positions
+            # Use provided user_state or fetch if not provided
+            if user_state is None and self.info:
+                try:
+                    user_state = self.info.user_state(self.address)
+                except Exception as e:
+                    logging.error(f"Failed to fetch user_state in export_state: {e}")
+                    user_state = {}
+            
+            # Clean old trades (>24h)
+            self.recent_trades = [t for t in self.recent_trades if now - t < 86400]
+            self.trade_history = [t for t in self.trade_history if now - t['timestamp'] < 86400]
+            
+            # Update daily/weekly tracking
+            current_date = datetime.utcnow().date()
+            current_week = datetime.utcnow().isocalendar()[1]
+            
+            if current_date != self.current_day:
+                self.start_of_day_balance = self.current_balance
+                self.current_day = current_date
+            
+            if current_week != self.current_week:
+                self.start_of_week_balance = self.current_balance
+                self.current_week = current_week
+            
+            # Calculate daily and weekly PnL
+            pnl_daily = self.current_balance - self.start_of_day_balance if self.start_of_day_balance > 0 else 0
+            pnl_weekly = self.current_balance - self.start_of_week_balance if self.start_of_week_balance > 0 else 0
+            
+            # Get margin info from user_state
+            margin_summary = user_state.get('marginSummary', {}) if user_state else {}
+            margin_used = float(margin_summary.get('totalMarginUsed', 0))
+            account_value = float(margin_summary.get('accountValue', self.current_balance))
+            available_balance = float(user_state.get('withdrawable', 0)) if user_state else 0
+            margin_ratio = (account_value / margin_used) if margin_used > 0 else 0
+            
+            # Get funding rate (cached, update every 5 minutes)
+            funding_rate = 0.0
+            funding_rate_24h_avg = 0.0
+            try:
+                if self.info and (now - self.cached_funding_rate_time > 300 or self.cached_funding_rate is None):
+                    meta_and_asset_ctxs = self.info.meta_and_asset_ctxs()
+                    meta, asset_ctxs = meta_and_asset_ctxs
+                    universe = meta['universe']
+                    coin_idx = next((i for i, c in enumerate(universe) if c['name'] == self.config['grid']['pair']), -1)
+                    if coin_idx != -1:
+                        ctx = asset_ctxs[coin_idx]
+                        funding_rate = float(ctx.get('funding', 0.0))
+                        self.cached_funding_rate = funding_rate
+                        self.cached_funding_rate_time = now
+                else:
+                    funding_rate = self.cached_funding_rate or 0.0
+            except Exception as e:
+                logging.debug(f"Could not fetch funding rate: {e}")
+                funding_rate = self.cached_funding_rate or 0.0
+            
+            # Get order history (cached, update every minute)
+            recent_fills = []
+            try:
+                if self.info and (now - self.cached_order_history_time > 60 or self.cached_order_history is None):
+                    # Get recent fills from historical orders
+                    # Note: historical_orders may need different parameters - wrap in try/except
+                    try:
+                        hist_orders = self.info.historical_orders(self.address)
+                        if hist_orders and isinstance(hist_orders, list):
+                            # Filter for fills in last 24h
+                            recent_fills = []
+                            for order in hist_orders:
+                                # Handle different possible order formats
+                                status = order.get('status', '').lower() if isinstance(order.get('status'), str) else ''
+                                if 'fill' in status or order.get('filled'):
+                                    fill_time = order.get('time', order.get('timestamp', 0))
+                                    # Convert to unix timestamp if needed
+                                    if isinstance(fill_time, str):
+                                        try:
+                                            fill_time = datetime.fromisoformat(fill_time.replace('Z', '+00:00')).timestamp()
+                                        except:
+                                            fill_time = 0
+                                    
+                                    if fill_time > 0 and now - fill_time < 86400:  # Last 24h
+                                        recent_fills.append({
+                                            'timestamp': fill_time,
+                                            'side': order.get('side', order.get('orderType', 'UNKNOWN')),
+                                            'price': float(order.get('price', order.get('limitPx', order.get('px', 0)))),
+                                            'size': float(order.get('sz', order.get('size', order.get('szDecimal', 0)))),
+                                            'pnl': float(order.get('closedPnl', order.get('pnl', 0)))
+                                        })
+                            self.cached_order_history = recent_fills
+                            self.cached_order_history_time = now
+                    except Exception as e:
+                        logging.debug(f"historical_orders API call failed: {e}")
+                        recent_fills = self.cached_order_history or []
+                else:
+                    recent_fills = self.cached_order_history or []
+            except Exception as e:
+                logging.debug(f"Could not fetch order history: {e}")
+                recent_fills = self.cached_order_history or []
+            
+            # Get open orders details
+            open_orders_detail = []
+            try:
+                if self.info:
+                    open_orders = self.info.open_orders(self.address)
+                    if open_orders and isinstance(open_orders, list):
+                        for order in open_orders:
+                            # Handle different possible order formats
+                            open_orders_detail.append({
+                                'side': order.get('side', order.get('orderType', 'UNKNOWN')),
+                                'price': float(order.get('limitPx', order.get('price', order.get('px', 0)))),
+                                'size': float(order.get('sz', order.get('size', order.get('szDecimal', 0)))),
+                                'coin': order.get('coin', order.get('asset', self.config['grid']['pair']))
+                            })
+            except Exception as e:
+                logging.debug(f"Could not fetch open orders: {e}")
+            
+            # Fetch and enhance positions
             positions = []
             try:
-                # We need to fetch fresh state for the export to be accurate
-                # or use the cached 'user_state' from the main loop if passed in.
-                # Ideally, main loop passes 'user_state' to this function.
-                # For now, we will re-fetch or use a cached self.current_user_state if we add it.
-                # Let's fetch fresh to be safe, though it adds latency.
-                # BETTER: Update main loop to store self.current_user_state
-                
-                # Using self.address to fetch state
-                if self.info:
-                    # Note: frequent polling might hit limits, but 10s tick is fine.
-                    # We will re-use the snapshot if we can, but let's just fetch here for robustness
-                    # if we are not passing it down.
-                    # Ideally, manage_grids should update a class variable.
-                    
-                    # Let's assume for this step we fetch it.
-                    state = self.info.user_state(self.address)
-                    for asset_pos in state.get("assetPositions", []):
+                if user_state:
+                    for asset_pos in user_state.get("assetPositions", []):
                         pos = asset_pos.get("position", {})
                         coin = pos.get("coin", "")
                         size = float(pos.get("szi", 0))
                         entry = float(pos.get("entryPx", 0))
                         u_pnl = float(pos.get("unrealizedPnl", 0))
+                        liq_px = float(pos.get("liquidationPx", 0))
+                        margin_used_pos = float(pos.get("marginUsed", 0))
                         
                         if size != 0:
+                            # Calculate ROI
+                            roi = (u_pnl / (entry * abs(size))) * 100 if entry > 0 and size != 0 else 0
+                            
                             positions.append({
                                 "symbol": coin,
                                 "side": "LONG" if size > 0 else "SHORT",
-                                "size": size,
+                                "size": abs(size),
                                 "entry_price": entry,
+                                "mark_price": current_price if coin == self.config['grid']['pair'] else 0,
+                                "liquidation_price": liq_px,
+                                "margin_used": margin_used_pos,
                                 "unrealized_pnl": u_pnl,
-                                "leverage": self.config['grid']['leverage'] # Approx
+                                "roi_pct": roi,
+                                "leverage": self.config['grid']['leverage']
                             })
             except Exception as e:
                 logging.error(f"Failed to fetch positions for export: {e}")
-
+            
+            # Calculate trade analytics
+            trade_analytics = self._calculate_trade_analytics()
+            
+            # Calculate grid efficiency
+            grid_efficiency = (active_orders / self.config['grid']['grids'] * 100) if self.config['grid']['grids'] > 0 else 0
+            
+            # Build comprehensive state data
             state_data = {
                 "status": "running" if self.running else "stopped",
                 "mode": "paper" if self.paper_mode else "live",
                 "updated_at": datetime.utcnow().isoformat(),
-                "timestamp": now, # Unix timestamp for heartbeat
-                "price": current_price,
+                "timestamp": now,
+                
+                # Balance & Account Info
+                "balance": self.current_balance,
+                "available_balance": available_balance,
+                "margin_used": margin_used,
+                "margin_ratio": margin_ratio,
+                "account_value": account_value,
+                "equity": account_value,
+                
+                # PnL Metrics
                 "pnl": pnl,
                 "pnl_pct": (pnl / self.start_balance * 100) if self.start_balance > 0 else 0,
-                "balance": self.current_balance,
-                "equity": self.current_balance + sum(p['unrealized_pnl'] for p in positions), 
+                "pnl_daily": pnl_daily,
+                "pnl_weekly": pnl_weekly,
+                
+                # Market Data
+                "price": current_price,
+                "funding_rate": funding_rate,
+                "funding_rate_24h_avg": funding_rate_24h_avg,  # TODO: Calculate from history
+                
+                # Trading Metrics
+                "total_trades": self.total_trades,
+                "trades_24h": len(self.recent_trades),
+                "win_rate": trade_analytics['win_rate'],
+                "avg_trade_size": trade_analytics['avg_trade_size'],
+                "largest_win": trade_analytics['largest_win'],
+                "largest_loss": trade_analytics['largest_loss'],
+                "profit_factor": trade_analytics['profit_factor'],
+                
+                # Grid Info
                 "active_grids": active_orders,
                 "total_grids": self.config['grid']['grids'],
+                "grid_efficiency": grid_efficiency,
                 "grid_range": {
                     "low": self.current_range_bottom,
                     "high": self.current_range_top
                 },
-                "total_trades": self.total_trades,
-                "trades_24h": len(self.recent_trades),
+                
+                # Positions & Orders
+                "positions": positions,
+                "open_orders": open_orders_detail,
+                "recent_fills": recent_fills,
+                
+                # Config
                 "leverage": self.config['grid']['leverage'],
-                "pair": self.config['grid']['pair'],
-                "positions": positions 
+                "pair": self.config['grid']['pair']
             }
             
             # Atomic write
@@ -362,7 +642,7 @@ class HyperGridBot:
             shutil.move(tempname, "state.json")
             
         except Exception as e:
-            logging.error(f"Failed to export state: {e}")
+            logging.error(f"Failed to export state: {e}", exc_info=True)
 
     def set_leverage(self):
         try:
@@ -379,6 +659,11 @@ class HyperGridBot:
             # user_state['openOrders'] gives us active orders.
             
             open_orders = user_state.get('openOrders', [])
+            
+            # Detect fills by comparing previous orders with current orders
+            self._detect_fills(self.previous_orders, open_orders, current_price)
+            
+            self.previous_orders = open_orders.copy() if open_orders else []
             self.orders = open_orders # Sync state
             
             if not open_orders:
