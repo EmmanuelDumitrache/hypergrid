@@ -352,12 +352,65 @@ class HyperGridBot:
         
         base_url = None # Default mainnet
         if self.paper_mode:
-             # Use testnet API URL for paper trading
-             base_url = "https://api.hyperliquid-testnet.xyz"
-             logging.info("Initializing in PAPER MODE (using testnet API)")
+             # Use mainnet for data if possible for realistic prices
+             # base_url = None means mainnet
+             # But if user wants testnet prices, we can keep testnet.
+             # User Request: "No tick bugs", "Simulate".
+             # Best data is Mainnet.
+             base_url = None 
+             logging.info("Initializing in SIMULATION MODE (using Mainnet data, Local execution)")
              
         self.info = Info(base_url=base_url, skip_ws=True)
-        self.exchange = Exchange(account, base_url=base_url, account_address=self.address)
+        # self.exchange = Exchange(...) # Skip exchange in paper simulation
+        if not self.paper_mode:
+             self.exchange = Exchange(account, base_url=base_url, account_address=self.address)
+        else:
+             self.exchange = None
+             self.sim_balance = 1000.0 # Start with $1000 simulated
+             self.sim_positions = []
+             self.orders = [] # Shared orders list logic
+
+    def _simulate_user_state(self, current_price):
+        """Generate mock user state for simulation"""
+        # Calculate unrealized PnL from sim_positions
+        u_pnl = 0.0
+        margin_used = 0.0
+        asset_positions = []
+        
+        for pos in self.sim_positions:
+            entry = pos['entryPx']
+            sz = pos['szi']
+            # Pnl = (Price - Entry) * Size (for Long, Szi is positive)
+            pnl = (current_price - entry) * sz
+            u_pnl += pnl
+            
+            # Approx margin 
+            m = (abs(sz) * current_price) / self.config['grid']['leverage']
+            margin_used += m
+            
+            asset_positions.append({
+                "position": {
+                    "coin": self.config['grid']['pair'],
+                    "szi": sz,
+                    "entryPx": entry,
+                    "unrealizedPnl": pnl,
+                    "marginUsed": m,
+                    "liquidationPx": 0 # TODO
+                }
+            })
+
+        equity = self.sim_balance + u_pnl
+        
+        return {
+            "marginSummary": {
+                "accountValue": equity,
+                "totalMarginUsed": margin_used,
+                "totalRawUsd": self.sim_balance
+            },
+            "withdrawable": max(0, self.sim_balance - margin_used),
+            "assetPositions": asset_positions,
+            "openOrders": self.orders # In sim, self.orders is the source of truth
+        }
 
     def update_live_log(self, pnl, current_price, active_grids):
         msg = f"PnL: ${pnl:+.2f} | {self.config['grid']['pair']} {current_price:.2f} | {active_grids}/{self.config['grid']['grids']} active grids"
@@ -383,7 +436,14 @@ class HyperGridBot:
                     continue
 
                 # Fetch User State & Market Data
-                user_state = self.info.user_state(self.address)
+                if self.paper_mode:
+                     # For sim, we need price first to gen state
+                     all_mids = self.info.all_mids()
+                     price = float(all_mids.get(self.config['grid']['pair'], 0))
+                     user_state = self._simulate_user_state(price)
+                else:
+                     user_state = self.info.user_state(self.address)
+                
                 logging.debug(f"User state response: {user_state}")
                 margin_summary = user_state.get('marginSummary', {})
                 logging.debug(f"Margin summary: {margin_summary}")
@@ -406,9 +466,11 @@ class HyperGridBot:
                 
                 logging.info(f"Detected account value: ${account_value:.2f} USDC (rawUsd: ${total_raw_usd:.2f}, withdrawable: ${withdrawable:.2f})")
                 
-                # Fetch Price
-                all_mids = self.info.all_mids()
-                price = float(all_mids.get(self.config['grid']['pair'], 0))
+                
+                # Fetch Price (if not already fetched for sim)
+                if not self.paper_mode:
+                    all_mids = self.info.all_mids()
+                    price = float(all_mids.get(self.config['grid']['pair'], 0))
                 
                 if price == 0:
                     logging.warning("Could not fetch price. Retrying...")
@@ -803,6 +865,10 @@ class HyperGridBot:
 
     def set_leverage(self):
         try:
+            if self.paper_mode:
+                logging.info("Skipping leverage update in Paper/Testnet mode (avoid 422 error).")
+                return
+
             logging.info(f"Setting leverage to {self.config['grid']['leverage']}x Isolated on {self.config['grid']['pair']}")
             if self.exchange:
                 self.exchange.update_leverage(self.config['grid']['leverage'], self.config['grid']['pair'], False)
@@ -818,12 +884,46 @@ class HyperGridBot:
             open_orders = user_state.get('openOrders', [])
             
             # Detect fills by comparing previous orders with current orders
-            self._detect_fills(self.previous_orders, open_orders, current_price)
+            # In live mode, API handles fills. In sim mode, we check logic manually OR rely on openOrders update.
+            # But in SIM mode, openOrders IS self.orders. So we need to check fills logic specifically for Sim.
             
-            self.previous_orders = open_orders.copy() if open_orders else []
-            self.orders = open_orders # Sync state
+            if self.paper_mode:
+                 # Check for fills locally
+                 filled_orders = []
+                 active_orders = []
+                 for o in self.orders:
+                     is_buy = o['side'] == 'B'
+                     limit = o['limitPx']
+                     
+                     # Simple fill logic:
+                     # Buy fills if Price <= Limit
+                     # Sell fills if Price >= Limit
+                     if is_buy and current_price <= limit:
+                         filled_orders.append(o)
+                     elif not is_buy and current_price >= limit:
+                         filled_orders.append(o)
+                     else:
+                         active_orders.append(o)
+                 
+                 self.orders = active_orders
+                 # Process Sim Fills
+                 if filled_orders:
+                     for fo in filled_orders:
+                         # Log
+                         logging.info(f"{Fore.GREEN}SIM FILL: {fo['side']} {fo['sz']} @ {fo['limitPx']} (Market: {current_price:.2f}){Style.RESET_ALL}")
+                         # Update Sim Balance / Position
+                         # Simplified: Just log trade success for MVP
+                         self.total_trades += 1
+                         self.recent_trades.append(time.time())
             
-            if not open_orders:
+            else:
+                 # Live Mode: API does the heavy lifting, we just detect differences
+                 self._detect_fills(self.previous_orders, open_orders, current_price)
+                 self.previous_orders = open_orders.copy() if open_orders else []
+                 self.orders = open_orders # Sync state
+            
+            # If no open orders, place new ones
+            if not self.orders: # universal check
                 if not self.auto_trading:
                     # If auto is off, don't place initial orders
                     return
@@ -856,10 +956,23 @@ class HyperGridBot:
                 new_orders = self.grid_manager.place_initial_orders(current_price)
                 
                 # Place orders
-                results = self.exchange.bulk_orders(new_orders)
+                if self.paper_mode:
+                    # Sim Placement
+                    for i, o in enumerate(new_orders):
+                         # Standardize keys for local state
+                         o['side'] = 'B' if o['is_buy'] else 'A'
+                         o['oid'] = int(time.time() * 1000) + i
+                         o['limitPx'] = o['limit_px']
+                    
+                    self.orders = new_orders
+                    logging.info(f"{Fore.GREEN}SIMULATED: {len(new_orders)} orders placed.{Style.RESET_ALL}")
                 
-                # Fix: Check response type rigorously
-                if isinstance(results, dict) and 'response' in results:
+                else:
+                    # Live Placement
+                    results = self.exchange.bulk_orders(new_orders)
+                    
+                    # Fix: Check response type rigorously
+                    if isinstance(results, dict) and 'response' in results:
                      status_list = results.get('response', {}).get('data', {}).get('statuses', [])
                      error_count = sum(1 for s in status_list if isinstance(s, dict) and 'error' in s)
                      
@@ -869,8 +982,14 @@ class HyperGridBot:
                      else:
                          logging.info(f"{Fore.GREEN}Orders placed successfully.{Style.RESET_ALL} (count: {len(new_orders)})")
                          self.orders = new_orders
+                elif isinstance(results, dict) and 'status' in results and results['status'] == 'err':
+                     # Handle explicit error status if SDK returns it
+                     logging.error(f"{Fore.RED}Order placement failed: {results.get('response', 'Unknown error')}{Style.RESET_ALL}")
+                elif isinstance(results, str):
+                     # Handle raw string error response
+                     logging.error(f"{Fore.RED}Order placement failed (Raw Error): {results}{Style.RESET_ALL}")
                 else:
-                     # It might be a string error or unexpected format
+                     # Fallback for unexpected format
                      logging.warning(f"Unexpected order response format: {str(results)[:100]}")
                 
             else:
