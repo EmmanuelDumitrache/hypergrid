@@ -23,16 +23,7 @@ class SafetyMonitor:
         self.initial_account_value = None
         self.start_of_day_value = None
         self.current_day = datetime.utcnow().date()
-        self.current_day = datetime.utcnow().date()
         self.emergency_triggered = False
-
-    def update_config(self, config):
-        """Update safety thresholds from new config"""
-        self.max_drawdown_pct = config['safety']['max_drawdown_pct']
-        self.daily_loss_limit = config['safety']['daily_loss_limit_usd']
-        self.min_margin_ratio = config['safety']['min_margin_ratio']
-        self.max_funding = config['safety']['max_adverse_funding_rate']
-        logger.info(f"Safety Monitor updated: DD={self.max_drawdown_pct}, DailyLimit={self.daily_loss_limit}")
 
     def sync_state(self, account_value):
         """Update internal state with latest account value"""

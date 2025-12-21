@@ -8,3 +8,5 @@ logs/
 *.log
 state.json
 config.json
+test_config.json
+.env

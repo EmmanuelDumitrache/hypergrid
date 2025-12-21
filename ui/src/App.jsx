@@ -180,21 +180,46 @@ function App() {
 
     useEffect(() => {
         let ws;
+        let reconnectTimeout;
         const connect = () => {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const wsTarget = window.location.port === "5173"
                 ? "ws://localhost:5173/ws/dashboard"
                 : `${protocol}//${window.location.host}/ws/dashboard`;
 
-            ws = new WebSocket(wsTarget);
-            ws.onopen = () => setConnected(true);
-            ws.onclose = () => { setConnected(false); setTimeout(connect, 3000); };
-            ws.onmessage = (e) => {
-                try { setData(JSON.parse(e.data)); } catch (err) { }
-            };
+            try {
+                ws = new WebSocket(wsTarget);
+                ws.onopen = () => {
+                    setConnected(true);
+                    if (reconnectTimeout) clearTimeout(reconnectTimeout);
+                };
+                ws.onclose = () => {
+                    setConnected(false);
+                    reconnectTimeout = setTimeout(connect, 3000);
+                };
+                ws.onerror = (error) => {
+                    console.error("WebSocket error:", error);
+                    setConnected(false);
+                };
+                ws.onmessage = (e) => {
+                    try {
+                        const parsed = JSON.parse(e.data);
+                        setData(parsed);
+                    } catch (err) {
+                        console.error("Failed to parse WebSocket message:", err);
+                    }
+                };
+            } catch (error) {
+                console.error("WebSocket connection error:", error);
+                setConnected(false);
+                reconnectTimeout = setTimeout(connect, 3000);
+            }
         };
         connect();
-        return () => ws?.close();
+        return () => {
+            if (reconnectTimeout) clearTimeout(reconnectTimeout);
+            ws?.close();
+        };
     }, []);
 
     const controlBot = (action) => axios.post(`/api/control/${action}`);
@@ -282,47 +307,68 @@ function App() {
                     <div className="max-w-[1600px] mx-auto grid grid-cols-12 gap-6">
 
                         {/* TOP METRICS ROW */}
-                        <div className="col-span-12 grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="col-span-12 grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
                             <StatCard
-                                label="Real-Time Price"
-                                value={`$${(bot.price || 0).toFixed(2)}`}
-                                subtext={`SOL/USD • ${bot.mode === 'live' ? 'LIVE' : 'PAPER'}`}
-                                icon={TrendingUp} color="cyan"
+                                label="Account Balance"
+                                value={`$${(bot.balance || 0).toFixed(2)}`}
+                                subtext={`Available: $${(bot.available_balance || 0).toFixed(2)}`}
+                                icon={Activity} color="blue"
                             />
                             <StatCard
                                 label="Total PnL"
                                 value={`$${(bot.pnl || 0).toFixed(2)}`}
-                                subtext={`${(bot.pnl_pct || 0).toFixed(2)}% Return`}
-                                icon={Activity} color={pnlColor}
+                                subtext={`${(bot.pnl_pct || 0).toFixed(2)}% • Daily: $${(bot.pnl_daily || 0).toFixed(2)}`}
+                                icon={TrendingUp} color={pnlColor}
                             />
                             <StatCard
                                 label="Total Trades"
                                 value={bot.total_trades || 0}
-                                subtext={`${bot.trades_24h || 0} in 24h`}
+                                subtext={`${bot.trades_24h || 0} in 24h • ${(bot.win_rate || 0).toFixed(1)}% win rate`}
                                 icon={Zap} color="purple"
                             />
                             <StatCard
                                 label="Active Grids"
                                 value={`${bot.active_grids || 0}/${bot.total_grids || 0}`}
-                                subtext="Orders Placed"
-                                icon={Server} color="blue"
+                                subtext={`${(bot.grid_efficiency || 0).toFixed(1)}% efficiency`}
+                                icon={Server} color="cyan"
+                            />
+                            <StatCard
+                                label="Funding Rate"
+                                value={`${((bot.funding_rate || 0) * 100).toFixed(4)}%`}
+                                subtext={`${bot.mode === 'live' ? 'LIVE' : 'PAPER'} • ${bot.pair || 'SOL'}`}
+                                icon={TrendingUp} color="green"
+                            />
+                            <StatCard
+                                label="Margin Health"
+                                value={`${(bot.margin_ratio || 0).toFixed(2)}x`}
+                                subtext={`Used: $${(bot.margin_used || 0).toFixed(2)}`}
+                                icon={Activity} color={bot.margin_ratio > 1.5 ? "green" : "yellow"}
                             />
                         </div>
 
                         {/* MIDDLE SECTION */}
                         <div className="col-span-12 lg:col-span-8 flex flex-col gap-6">
-                            {/* Main Chart Card */}
-                            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 min-h-[400px]">
+                            {/* Performance Metrics Card */}
+                            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
                                 <div className="flex justify-between items-center mb-6">
-                                    <h3 className="font-bold text-slate-300 flex items-center gap-2"><Activity size={16} /> Price Action</h3>
-                                    <div className="flex gap-2 text-xs">
-                                        <span className="bg-slate-800 px-3 py-1 rounded-full text-slate-400 border border-slate-700">Real-Time</span>
-                                    </div>
+                                    <h3 className="font-bold text-slate-300 flex items-center gap-2"><Activity size={16} /> Performance Metrics</h3>
                                 </div>
-                                <div className="h-[300px] flex items-center justify-center text-slate-600 border border-dashed border-slate-800 rounded-lg bg-slate-950/30">
-                                    <div className="text-center">
-                                        <p className="text-4xl font-bold text-slate-800 mb-2">${(bot.price || 0).toFixed(2)}</p>
-                                        <p className="text-sm">Chart rendering requires >1h of historical data.</p>
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                    <div className="bg-slate-950/50 p-4 rounded-lg border border-slate-800">
+                                        <div className="text-xs text-slate-500 mb-1">Largest Win</div>
+                                        <div className="text-lg font-bold text-green-400">${(bot.largest_win || 0).toFixed(2)}</div>
+                                    </div>
+                                    <div className="bg-slate-950/50 p-4 rounded-lg border border-slate-800">
+                                        <div className="text-xs text-slate-500 mb-1">Largest Loss</div>
+                                        <div className="text-lg font-bold text-red-400">${(bot.largest_loss || 0).toFixed(2)}</div>
+                                    </div>
+                                    <div className="bg-slate-950/50 p-4 rounded-lg border border-slate-800">
+                                        <div className="text-xs text-slate-500 mb-1">Profit Factor</div>
+                                        <div className="text-lg font-bold text-slate-300">{(bot.profit_factor || 0).toFixed(2)}</div>
+                                    </div>
+                                    <div className="bg-slate-950/50 p-4 rounded-lg border border-slate-800">
+                                        <div className="text-xs text-slate-500 mb-1">Avg Trade Size</div>
+                                        <div className="text-lg font-bold text-slate-300">{(bot.avg_trade_size || 0).toFixed(4)}</div>
                                     </div>
                                 </div>
                             </div>
@@ -340,22 +386,74 @@ function App() {
                                                 <th className="p-3 font-medium">Size</th>
                                                 <th className="p-3 font-medium">Entry Price</th>
                                                 <th className="p-3 font-medium">Mark Price</th>
+                                                <th className="p-3 font-medium">Liq. Price</th>
+                                                <th className="p-3 font-medium">Margin</th>
+                                                <th className="p-3 font-medium">ROI %</th>
                                                 <th className="p-3 font-medium">PnL</th>
                                             </tr>
                                         </thead>
                                         <tbody className="text-slate-300">
                                             {(bot.positions || []).length === 0 ? (
-                                                <tr><td colSpan="5" className="p-8 text-center text-slate-600 italic">No active positions found on chain.</td></tr>
+                                                <tr><td colSpan="8" className="p-8 text-center text-slate-600 italic">No active positions</td></tr>
                                             ) : (
                                                 bot.positions.map((pos, i) => (
-                                                    <tr key={i} className="border-t border-slate-800/50">
-                                                        <td className={`p-3 font-bold ${pos.size > 0 ? 'text-green-400' : 'text-red-400'}`}>{pos.size > 0 ? 'LONG' : 'SHORT'}</td>
-                                                        <td className="p-3">{Math.abs(pos.size)} SOL</td>
-                                                        <td className="p-3">${pos.entry_price}</td>
-                                                        <td className="p-3">${bot.price}</td>
-                                                        <td className={`p-3 ${pos.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>${pos.unrealized_pnl}</td>
+                                                    <tr key={i} className="border-t border-slate-800/50 hover:bg-slate-950/50">
+                                                        <td className={`p-3 font-bold ${pos.side === 'LONG' ? 'text-green-400' : 'text-red-400'}`}>{pos.side}</td>
+                                                        <td className="p-3">{pos.size.toFixed(4)} {pos.symbol}</td>
+                                                        <td className="p-3">${pos.entry_price.toFixed(2)}</td>
+                                                        <td className="p-3">${(pos.mark_price || bot.price || 0).toFixed(2)}</td>
+                                                        <td className="p-3 text-slate-500">${(pos.liquidation_price || 0).toFixed(2)}</td>
+                                                        <td className="p-3 text-slate-400">${(pos.margin_used || 0).toFixed(2)}</td>
+                                                        <td className={`p-3 font-bold ${(pos.roi_pct || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                                            {(pos.roi_pct || 0).toFixed(2)}%
+                                                        </td>
+                                                        <td className={`p-3 font-bold ${pos.unrealized_pnl >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                                            ${pos.unrealized_pnl.toFixed(2)}
+                                                        </td>
                                                     </tr>
                                                 ))
+                                            )}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+
+                            {/* Order History Table */}
+                            <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+                                <div className="p-4 border-b border-slate-800 bg-slate-950/30">
+                                    <h3 className="font-bold text-slate-300 text-sm">Recent Fills (24h)</h3>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-left text-xs">
+                                        <thead className="bg-slate-950/50 text-slate-500">
+                                            <tr>
+                                                <th className="p-3 font-medium">Time</th>
+                                                <th className="p-3 font-medium">Side</th>
+                                                <th className="p-3 font-medium">Price</th>
+                                                <th className="p-3 font-medium">Size</th>
+                                                <th className="p-3 font-medium">PnL</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="text-slate-300">
+                                            {(bot.recent_fills || []).length === 0 ? (
+                                                <tr><td colSpan="5" className="p-8 text-center text-slate-600 italic">No recent fills</td></tr>
+                                            ) : (
+                                                bot.recent_fills.slice(0, 20).map((fill, i) => {
+                                                    const fillTime = new Date(fill.timestamp * 1000);
+                                                    return (
+                                                        <tr key={i} className="border-t border-slate-800/50 hover:bg-slate-950/50">
+                                                            <td className="p-3 text-slate-400">{fillTime.toLocaleTimeString()}</td>
+                                                            <td className={`p-3 font-bold ${fill.side === 'B' || fill.side === 'BUY' ? 'text-green-400' : 'text-red-400'}`}>
+                                                                {fill.side === 'B' || fill.side === 'BUY' ? 'BUY' : 'SELL'}
+                                                            </td>
+                                                            <td className="p-3">${fill.price.toFixed(2)}</td>
+                                                            <td className="p-3">{fill.size.toFixed(4)}</td>
+                                                            <td className={`p-3 font-bold ${(fill.pnl || 0) >= 0 ? 'text-green-400' : 'text-red-400'}`}>
+                                                                ${(fill.pnl || 0).toFixed(2)}
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })
                                             )}
                                         </tbody>
                                     </table>

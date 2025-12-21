@@ -31,17 +31,16 @@ except ImportError:
 # Setup Logging with Colors
 class ColoredFormatter(logging.Formatter):
     FORMATS = {
-        logging.DEBUG: Fore.CYAN + Style.DIM + "%(asctime)s" + Style.RESET_ALL + " | " + Fore.CYAN + "%(levelname)-8s" + Style.RESET_ALL + " | " + Fore.CYAN + "%(message)s" + Style.RESET_ALL,
-        logging.INFO: Fore.WHITE + Style.DIM + "%(asctime)s" + Style.RESET_ALL + " | " + Fore.GREEN + Style.BRIGHT + "%(levelname)-8s" + Style.RESET_ALL + " | " + Fore.WHITE + "%(message)s" + Style.RESET_ALL,
-        logging.WARNING: Fore.YELLOW + Style.DIM + "%(asctime)s" + Style.RESET_ALL + " | " + Fore.YELLOW + Style.BRIGHT + "%(levelname)-8s" + Style.RESET_ALL + " | " + Fore.YELLOW + "%(message)s" + Style.RESET_ALL,
-        logging.ERROR: Fore.RED + Style.DIM + "%(asctime)s" + Style.RESET_ALL + " | " + Fore.RED + Style.BRIGHT + "%(levelname)-8s" + Style.RESET_ALL + " | " + Fore.RED + "%(message)s" + Style.RESET_ALL,
-        logging.CRITICAL: Fore.RED + Style.BRIGHT + "%(asctime)s" + Style.RESET_ALL + " | " + Fore.RED + Style.BRIGHT + "%(levelname)-8s" + Style.RESET_ALL + " | " + Fore.RED + Style.BRIGHT + "%(message)s" + Style.RESET_ALL
+        logging.DEBUG: Fore.CYAN + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL,
+        logging.INFO: Fore.GREEN + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL,
+        logging.WARNING: Fore.YELLOW + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL,
+        logging.ERROR: Fore.RED + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL,
+        logging.CRITICAL: Fore.RED + Style.BRIGHT + "%(asctime)s | %(levelname)s | %(message)s" + Style.RESET_ALL
     }
 
     def format(self, record):
         log_fmt = self.FORMATS.get(record.levelno)
-        # Simplify date format to just Time
-        formatter = logging.Formatter(log_fmt, datefmt='%H:%M:%S')
+        formatter = logging.Formatter(log_fmt, datefmt='%Y-%m-%d | %H:%M:%S')
         return formatter.format(record)
 
 def setup_logging(config):
@@ -59,11 +58,6 @@ def setup_logging(config):
     
     logger = logging.getLogger()
     logger.setLevel(config['system'].get('log_level', 'INFO'))
-    
-    # Silence noisy libraries
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
-    logging.getLogger("requests").setLevel(logging.WARNING)
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
     # Clean existing handlers
     logger.handlers = []
     logger.addHandler(file_handler)
@@ -75,10 +69,7 @@ class HyperGridBot:
     def __init__(self, config_path, paper_mode=False):
         self.running = True
         self.paused = False
-        self.auto_trading = True  # New flag for automation
-        self.auto_range_enabled = False # New flag for auto-range
         self.paper_mode = paper_mode
-        self.config_path = config_path
         self.load_config(config_path)
         
         # Setup Logger
@@ -122,172 +113,38 @@ class HyperGridBot:
 
     def command_listener(self):
         """Listens for CLI commands in a background thread"""
-        print(f"\n{Fore.CYAN}{Style.BRIGHT}>>> Interactive CLI Active.{Style.RESET_ALL} {Fore.CYAN}Type /commands for help.{Style.RESET_ALL}\n")
+        print(f"{Fore.CYAN}Interactive CLI Active. Type /help for commands.{Style.RESET_ALL}")
         while self.running:
             try:
-                cmd_raw = input()
-                if not cmd_raw.startswith("/"):
+                cmd = input()
+                if not cmd.startswith("/"):
                     continue
                 
-                # Split command and args
-                parts = cmd_raw.strip().lower().split()
-                cmd = parts[0]
-                args = parts[1:]
-                
-                if cmd in ["/help", "/commands"]:
-                    print(f"\n{Fore.CYAN}{Style.BRIGHT}╔════════════════════════════════════╗")
-                    print(f"║       HYPERGRID BOT COMMANDS       ║")
-                    print(f"╠════════════════════════════════════╣{Style.RESET_ALL}")
-                    print(f"{Fore.CYAN}║ {Fore.GREEN}/start   {Fore.WHITE}- Resume trading            {Fore.CYAN}║")
-                    print(f"{Fore.CYAN}║ {Fore.GREEN}/stop    {Fore.WHITE}- Pause trading             {Fore.CYAN}║")
-                    print(f"{Fore.CYAN}║ {Fore.GREEN}/auto    {Fore.WHITE}- Toggle auto-grid [on|off] {Fore.CYAN}║")
-                    print(f"{Fore.CYAN}║ {Fore.GREEN}/autorange{Fore.WHITE}- Toggle auto-range [on|off]{Fore.CYAN}║")
-                    print(f"{Fore.CYAN}║ {Fore.GREEN}/status  {Fore.WHITE}- Show dashboard & PnL      {Fore.CYAN}║")
-                    print(f"{Fore.CYAN}║ {Fore.GREEN}/mode    {Fore.WHITE}- Set [paper|testnet]       {Fore.CYAN}║")
-                    print(f"{Fore.CYAN}║ {Fore.GREEN}/range   {Fore.WHITE}- Set [min] [max]           {Fore.CYAN}║")
-                    print(f"{Fore.CYAN}║ {Fore.GREEN}/risk    {Fore.WHITE}- Set risk params           {Fore.CYAN}║")
-                    print(f"{Fore.CYAN}║ {Fore.GREEN}/save    {Fore.WHITE}- Save config to disk       {Fore.CYAN}║")
-                    print(f"{Fore.CYAN}║ {Fore.GREEN}/reload  {Fore.WHITE}- Reload config from disk   {Fore.CYAN}║")
-                    print(f"{Fore.CYAN}║ {Fore.GREEN}/panic   {Fore.WHITE}- STOP & CANCEL ALL         {Fore.CYAN}║")
-                    print(f"{Fore.CYAN}║ {Fore.GREEN}/quit    {Fore.WHITE}- Shutdown bot              {Fore.CYAN}║")
-                    print(f"{Fore.CYAN}╚════════════════════════════════════╝{Style.RESET_ALL}\n")
+                cmd = cmd.strip().lower()
+                if cmd == "/help":
+                    print(f"{Fore.YELLOW}=== HyperGridBot Commands ==={Style.RESET_ALL}")
+                    print(f"{Fore.GREEN}/start {Style.RESET_ALL}- Resume trading")
+                    print(f"{Fore.GREEN}/stop  {Style.RESET_ALL}- Pause trading (maintains orders)")
+                    print(f"{Fore.GREEN}/status{Style.RESET_ALL}- Show bot status & PnL")
+                    print(f"{Fore.GREEN}/quit  {Style.RESET_ALL}- Shutdown bot")
                 
                 elif cmd == "/stop":
                     self.paused = True
-                    logging.warning(f"{Style.BRIGHT}BOT PAUSED{Style.RESET_ALL} by user command.")
+                    logging.warning("Bot PAUSED by user command.")
                 
                 elif cmd == "/start":
                     self.paused = False
-                    logging.info(f"{Style.BRIGHT}BOT RESUMED{Style.RESET_ALL} by user command.")
-                
-                elif cmd == "/auto":
-                    if args:
-                        mode = args[0]
-                        if mode == "on":
-                            self.auto_trading = True
-                            logging.info(f"{Style.BRIGHT}AUTOMATION ENABLED{Style.RESET_ALL}")
-                        elif mode == "off":
-                            self.auto_trading = False
-                            logging.info(f"{Style.BRIGHT}AUTOMATION DISABLED{Style.RESET_ALL}")
-                    else:
-                        status = "ON" if self.auto_trading else "OFF"
-                        print(f"{Fore.CYAN}Auto Mode: {status}{Style.RESET_ALL} (Usage: /auto on|off)")
-
-                elif cmd == "/autorange":
-                    if args:
-                        mode = args[0]
-                        if mode == "on":
-                            self.auto_range_enabled = True
-                            logging.info(f"{Style.BRIGHT}AUTO-RANGE ENABLED{Style.RESET_ALL}")
-                        elif mode == "off":
-                            self.auto_range_enabled = False
-                            logging.info(f"{Style.BRIGHT}AUTO-RANGE DISABLED{Style.RESET_ALL}")
-                    else:
-                        status = "ON" if self.auto_range_enabled else "OFF"
-                        print(f"{Fore.CYAN}Auto-Range: {status}{Style.RESET_ALL} (Usage: /autorange on|off)")
-
+                    logging.info("Bot RESUMED by user command.")
+                    
                 elif cmd == "/status":
                     self.print_status()
-
-                elif cmd == "/panic":
-                    logging.critical(f"{Fore.RED}PANIC TRIGGERED BY USER!{Style.RESET_ALL}")
-                    self.paused = True
-                    self.safety.emergency_exit()
-                    logging.info("Bot paused. use /start to resume (careful!).")
-
-                elif cmd == "/save":
-                    try:
-                        with open(self.config_path, 'w') as f:
-                            json.dump(self.config, f, indent=4)
-                        logging.info(f"{Fore.GREEN}Configuration saved to {self.config_path}{Style.RESET_ALL}")
-                    except Exception as e:
-                        logging.error(f"Failed to save config: {e}")
-
-                elif cmd == "/reload":
-                    try:
-                        self.load_config(self.config_path)
-                        # Re-apply safety settings
-                        if hasattr(self, 'safety'):
-                            self.safety.update_config(self.config)
-                        # Re-apply grid settings
-                        if hasattr(self, 'grid_manager'):
-                             # Update grid config reference if needed, usually passed by reference but good to be safe
-                             self.grid_manager.config = self.config
-                             # Should we reset manual range? User might expect config values.
-                             # If config has no manual range, maybe reset?
-                             # For now, we trust loading config updates known keys.
-                        logging.info(f"{Fore.GREEN}Configuration reloaded.{Style.RESET_ALL}")
-                    except Exception as e:
-                        logging.error(f"Failed to reload config: {e}")
-
-                elif cmd == "/mode":
-                    if args:
-                        target = args[0]
-                        if target == "paper":
-                            self.paper_mode = True
-                            # Re-init SDK
-                            self.setup_sdk()
-                        elif target == "testnet":
-                            self.paper_mode = True # Testnet is paper logic in this bot for now
-                            self.config['wallet']['base_url'] = "https://api.hyperliquid-testnet.xyz"
-                            self.setup_sdk()
-                        elif target == "mainnet":
-                            # Caution
-                            # self.paper_mode = False
-                            # self.setup_sdk()
-                            logging.warning("Switching to Mainnet not fully enabled in this CLI version for safety.")
-                        else:
-                            print("Usage: /mode [paper|testnet]")
-                    else:
-                        print(f"Current Mode: {'PAPER' if self.paper_mode else 'LIVE'}")
-
-                elif cmd == "/range":
-                    if len(args) >= 2:
-                        try:
-                            min_p = float(args[0])
-                            max_p = float(args[1])
-                            
-                            # Set in config
-                            # We don't have standard keys for this in config.json yet, but can add runtime keys
-                            # Better: Set on grid_manager directly
-                            if hasattr(self, 'grid_manager'):
-                                self.grid_manager.set_manual_range(min_p, max_p)
-                                logging.info(f"Manual Range Set: {min_p} - {max_p}")
-                                # Clear existing orders to force rebuild?
-                                # self.orders = [] 
-                                # But we need to cancel first?
-                                # Let's just set it, main loop will see 'No active orders' if we clear?
-                                # Ideally: /stop -> /range -> /start
-                        except ValueError:
-                             print("Usage: /range [min] [max]")
-                    else:
-                        # Show current
-                        if hasattr(self, 'grid_manager'):
-                             print(f"Range: {self.grid_manager.min_price} - {self.grid_manager.max_price}")
-                        else:
-                             print("Grid Manager not initialized.")
-
-                elif cmd == "/risk":
-                    if len(args) >= 2:
-                        key = args[0]
-                        val = args[1]
-                        if key == "dd":
-                            self.config['safety']['max_drawdown_pct'] = float(val)
-                        elif key == "daily":
-                            self.config['safety']['daily_loss_limit_usd'] = float(val)
-                        
-                        self.safety.update_config(self.config)
-                        logging.info(f"Risk Updated: {key}={val}")
-                    else:
-                        print(f"Risk Params: DD={self.config['safety']['max_drawdown_pct']}, Daily={self.config['safety']['daily_loss_limit_usd']}")
-
+                    
                 elif cmd == "/quit":
-                    print(f"{Fore.RED}Shutting down...{Style.RESET_ALL}")
                     self.shutdown(None, None)
                     break
                     
                 else:
-                    print(f"{Fore.RED}Unknown command: {cmd}{Style.RESET_ALL}")
+                    print(f"{Fore.RED}Unknown command. Type /help{Style.RESET_ALL}")
             except EOFError:
                 break
             except Exception as e:
@@ -298,22 +155,9 @@ class HyperGridBot:
         print(f"Status: {Fore.RED + 'PAUSED' if self.paused else Fore.GREEN + 'RUNNING'}{Style.RESET_ALL}")
         print(f"Mode: {'PAPER' if self.paper_mode else 'LIVE'}")
         print(f"Pair: {self.config.get('grid', {}).get('pair', 'N/A')}")
-        
-        # Range Info
-        if hasattr(self, 'grid_manager') and self.grid_manager.min_price:
-             print(f"Range: Manual ({self.grid_manager.min_price} - {self.grid_manager.max_price})")
-        else:
-             print(f"Range: Auto/Spread ({self.config['grid'].get('spacing_pct',0)*100:.2f}% spacing)")
-
         print(f"Balance: ${self.current_balance:.2f}")
         print(f"PnL: {Fore.GREEN if (self.current_balance - self.start_balance) >= 0 else Fore.RED}${self.current_balance - self.start_balance:.2f}{Style.RESET_ALL}")
         print(f"Active Grids: {len(self.orders)}")
-        
-        # Safety Info
-        print(f"Safety: DD Max {self.config['safety']['max_drawdown_pct']*100}%, Daily Limit ${self.config['safety']['daily_loss_limit_usd']}")
-        status_auto = "ON" if self.auto_trading else "OFF"
-        status_autorange = "ON" if self.auto_range_enabled else "OFF"
-        print(f"Automation: {status_auto} | Auto-Range: {status_autorange}")
         print(f"===========================\n")
 
     def load_config(self, path):
@@ -352,65 +196,12 @@ class HyperGridBot:
         
         base_url = None # Default mainnet
         if self.paper_mode:
-             # Use mainnet for data if possible for realistic prices
-             # base_url = None means mainnet
-             # But if user wants testnet prices, we can keep testnet.
-             # User Request: "No tick bugs", "Simulate".
-             # Best data is Mainnet.
-             base_url = None 
-             logging.info("Initializing in SIMULATION MODE (using Mainnet data, Local execution)")
+             # Use testnet API URL for paper trading
+             base_url = "https://api.hyperliquid-testnet.xyz"
+             logging.info("Initializing in PAPER MODE (using testnet API)")
              
         self.info = Info(base_url=base_url, skip_ws=True)
-        # self.exchange = Exchange(...) # Skip exchange in paper simulation
-        if not self.paper_mode:
-             self.exchange = Exchange(account, base_url=base_url, account_address=self.address)
-        else:
-             self.exchange = None
-             self.sim_balance = 1000.0 # Start with $1000 simulated
-             self.sim_positions = []
-             self.orders = [] # Shared orders list logic
-
-    def _simulate_user_state(self, current_price):
-        """Generate mock user state for simulation"""
-        # Calculate unrealized PnL from sim_positions
-        u_pnl = 0.0
-        margin_used = 0.0
-        asset_positions = []
-        
-        for pos in self.sim_positions:
-            entry = pos['entryPx']
-            sz = pos['szi']
-            # Pnl = (Price - Entry) * Size (for Long, Szi is positive)
-            pnl = (current_price - entry) * sz
-            u_pnl += pnl
-            
-            # Approx margin 
-            m = (abs(sz) * current_price) / self.config['grid']['leverage']
-            margin_used += m
-            
-            asset_positions.append({
-                "position": {
-                    "coin": self.config['grid']['pair'],
-                    "szi": sz,
-                    "entryPx": entry,
-                    "unrealizedPnl": pnl,
-                    "marginUsed": m,
-                    "liquidationPx": 0 # TODO
-                }
-            })
-
-        equity = self.sim_balance + u_pnl
-        
-        return {
-            "marginSummary": {
-                "accountValue": equity,
-                "totalMarginUsed": margin_used,
-                "totalRawUsd": self.sim_balance
-            },
-            "withdrawable": max(0, self.sim_balance - margin_used),
-            "assetPositions": asset_positions,
-            "openOrders": self.orders # In sim, self.orders is the source of truth
-        }
+        self.exchange = Exchange(account, base_url=base_url, account_address=self.address)
 
     def update_live_log(self, pnl, current_price, active_grids):
         msg = f"PnL: ${pnl:+.2f} | {self.config['grid']['pair']} {current_price:.2f} | {active_grids}/{self.config['grid']['grids']} active grids"
@@ -436,14 +227,7 @@ class HyperGridBot:
                     continue
 
                 # Fetch User State & Market Data
-                if self.paper_mode:
-                     # For sim, we need price first to gen state
-                     all_mids = self.info.all_mids()
-                     price = float(all_mids.get(self.config['grid']['pair'], 0))
-                     user_state = self._simulate_user_state(price)
-                else:
-                     user_state = self.info.user_state(self.address)
-                
+                user_state = self.info.user_state(self.address)
                 logging.debug(f"User state response: {user_state}")
                 margin_summary = user_state.get('marginSummary', {})
                 logging.debug(f"Margin summary: {margin_summary}")
@@ -466,11 +250,9 @@ class HyperGridBot:
                 
                 logging.info(f"Detected account value: ${account_value:.2f} USDC (rawUsd: ${total_raw_usd:.2f}, withdrawable: ${withdrawable:.2f})")
                 
-                
-                # Fetch Price (if not already fetched for sim)
-                if not self.paper_mode:
-                    all_mids = self.info.all_mids()
-                    price = float(all_mids.get(self.config['grid']['pair'], 0))
+                # Fetch Price
+                all_mids = self.info.all_mids()
+                price = float(all_mids.get(self.config['grid']['pair'], 0))
                 
                 if price == 0:
                     logging.warning("Could not fetch price. Retrying...")
@@ -518,20 +300,8 @@ class HyperGridBot:
                     self.safety.emergency_exit()
                     break
 
-                # Gather 24h stats for Auto-Range
-                high_24h = price * 1.05 # Mock default if API fails
-                low_24h = price * 0.95
-                try:
-                    # Attempt to get real stats if possible using available calls
-                    # SDK doesn't always expose 24h stats easily in 'info', sometimes in meta or careful calls
-                    # For now we proceed with current price. 
-                    # Ideally: self.info.ticker? 
-                    pass
-                except:
-                    pass
-
                 # Grid Logic
-                self.manage_grids(price, user_state, high_24h, low_24h)
+                self.manage_grids(price, user_state)
                 
                 # Update Metrics
                 if self.start_balance == 0 and self.safety.initial_account_value:
@@ -812,7 +582,6 @@ class HyperGridBot:
                 "margin_ratio": margin_ratio,
                 "account_value": account_value,
                 "equity": account_value,
-                "auto_trading": self.auto_trading,
                 
                 # PnL Metrics
                 "pnl": pnl,
@@ -865,17 +634,13 @@ class HyperGridBot:
 
     def set_leverage(self):
         try:
-            if self.paper_mode:
-                logging.info("Skipping leverage update in Paper/Testnet mode (avoid 422 error).")
-                return
-
             logging.info(f"Setting leverage to {self.config['grid']['leverage']}x Isolated on {self.config['grid']['pair']}")
             if self.exchange:
                 self.exchange.update_leverage(self.config['grid']['leverage'], self.config['grid']['pair'], False)
         except Exception as e:
             logging.error(f"Failed to set leverage: {e}")
 
-    def manage_grids(self, current_price, user_state, high_24h=0, low_24h=0):
+    def manage_grids(self, current_price, user_state):
         try:
             # Note: In a real implementation, we would check for existing open orders
             # and only place new ones if the grid is empty or needs rebalancing.
@@ -884,113 +649,26 @@ class HyperGridBot:
             open_orders = user_state.get('openOrders', [])
             
             # Detect fills by comparing previous orders with current orders
-            # In live mode, API handles fills. In sim mode, we check logic manually OR rely on openOrders update.
-            # But in SIM mode, openOrders IS self.orders. So we need to check fills logic specifically for Sim.
+            self._detect_fills(self.previous_orders, open_orders, current_price)
             
-            if self.paper_mode:
-                 # Check for fills locally
-                 filled_orders = []
-                 active_orders = []
-                 for o in self.orders:
-                     is_buy = o['side'] == 'B'
-                     limit = o['limitPx']
-                     
-                     # Simple fill logic:
-                     # Buy fills if Price <= Limit
-                     # Sell fills if Price >= Limit
-                     if is_buy and current_price <= limit:
-                         filled_orders.append(o)
-                     elif not is_buy and current_price >= limit:
-                         filled_orders.append(o)
-                     else:
-                         active_orders.append(o)
-                 
-                 self.orders = active_orders
-                 # Process Sim Fills
-                 if filled_orders:
-                     for fo in filled_orders:
-                         # Log
-                         logging.info(f"{Fore.GREEN}SIM FILL: {fo['side']} {fo['sz']} @ {fo['limitPx']} (Market: {current_price:.2f}){Style.RESET_ALL}")
-                         # Update Sim Balance / Position
-                         # Simplified: Just log trade success for MVP
-                         self.total_trades += 1
-                         self.recent_trades.append(time.time())
+            self.previous_orders = open_orders.copy() if open_orders else []
+            self.orders = open_orders # Sync state
             
-            else:
-                 # Live Mode: API does the heavy lifting, we just detect differences
-                 self._detect_fills(self.previous_orders, open_orders, current_price)
-                 self.previous_orders = open_orders.copy() if open_orders else []
-                 self.orders = open_orders # Sync state
-            
-            # If no open orders, place new ones
-            if not self.orders: # universal check
-                if not self.auto_trading:
-                    # If auto is off, don't place initial orders
-                    return
-
+            if not open_orders:
                 logging.info(f"No active orders. Initializing grid at {current_price}")
                 # Initialize GridManager if not exists or just use instance
+                # We should instantiate GridManager in __init__, but for now we do it here or assume self.grid_manager exists
+                # Let's assume we added it to __init__, or lazily init here.
+                # To be clean, I will update __init__ in a separate chunk or just init here.
                 from src.grid import GridManager 
                 if not hasattr(self, 'grid_manager'):
                     self.grid_manager = GridManager(self.config, self.exchange)
-                    # Attempt to get precision from SDK meta
-                    try:
-                        meta = self.info.meta()
-                        universe = meta.get('universe', [])
-                        coin_meta = next((item for item in universe if item['name'] == self.config['grid']['pair']), None)
-                        if coin_meta:
-                            sz_decimals = coin_meta['szDecimals']
-                            self.grid_manager.set_precision(sz_decimals, 4)
-                            logging.info(f"Precision set from API: Size {sz_decimals}, Price 4")
-                            # Try to get tick size? usually not exposed directly here easily, assume 0.001 or deduce
-                    except Exception as e:
-                        logging.warning(f"Could not fetch precision from API, using defaults: {e}")
-
-                # Auto-Range Logic
-                if self.auto_range_enabled:
-                    # If high/low are defaults (0), calculate from current +/- small buffer or just use current
-                    h = high_24h if high_24h > 0 else current_price * 1.02
-                    l = low_24h if low_24h > 0 else current_price * 0.98
-                    self.grid_manager.calculate_volatility_range(current_price, h, l)
 
                 new_orders = self.grid_manager.place_initial_orders(current_price)
                 
                 # Place orders
-                if self.paper_mode:
-                    # Sim Placement
-                    for i, o in enumerate(new_orders):
-                         # Standardize keys for local state
-                         o['side'] = 'B' if o['is_buy'] else 'A'
-                         o['oid'] = int(time.time() * 1000) + i
-                         o['limitPx'] = o['limit_px']
-                    
-                    self.orders = new_orders
-                    logging.info(f"{Fore.GREEN}SIMULATED: {len(new_orders)} orders placed.{Style.RESET_ALL}")
-                
-                else:
-                    # Live Placement
-                    results = self.exchange.bulk_orders(new_orders)
-                    
-                    # Fix: Check response type rigorously
-                    if isinstance(results, dict) and 'response' in results:
-                     status_list = results.get('response', {}).get('data', {}).get('statuses', [])
-                     error_count = sum(1 for s in status_list if isinstance(s, dict) and 'error' in s)
-                     
-                     if error_count > 0:
-                         first_error = next((s['error'] for s in status_list if isinstance(s, dict) and 'error' in s), "Unknown Error")
-                         logging.error(f"{Fore.RED}Failed to place {error_count}/{len(new_orders)} orders.{Style.RESET_ALL} Reason: {first_error}")
-                     else:
-                         logging.info(f"{Fore.GREEN}Orders placed successfully.{Style.RESET_ALL} (count: {len(new_orders)})")
-                         self.orders = new_orders
-                elif isinstance(results, dict) and 'status' in results and results['status'] == 'err':
-                     # Handle explicit error status if SDK returns it
-                     logging.error(f"{Fore.RED}Order placement failed: {results.get('response', 'Unknown error')}{Style.RESET_ALL}")
-                elif isinstance(results, str):
-                     # Handle raw string error response
-                     logging.error(f"{Fore.RED}Order placement failed (Raw Error): {results}{Style.RESET_ALL}")
-                else:
-                     # Fallback for unexpected format
-                     logging.warning(f"Unexpected order response format: {str(results)[:100]}")
+                results = self.exchange.bulk_orders(new_orders)
+                logging.info(f"Orders placed. Result: {results}")
                 
             else:
                 # Simplistic Logic: If price moves out of range, cancel all and reset?
@@ -1009,22 +687,11 @@ class HyperGridBot:
         self.running = False
         try:
             if self.exchange:
-                # Cancel open orders
-                open_orders = self.info.open_orders(self.address)
-                if open_orders:
-                    # Construct list of (coin, oid) tuples or dicts as per SDK
-                    # SDK's bulk_cancel usually expects [{'coin': 'SOL', 'oid': 123}, ...]
-                    cancel_requests = [{'coin': o['coin'], 'oid': o['oid']} for o in open_orders]
-                    logging.info(f"Cancelling {len(cancel_requests)} orders...")
-                    self.exchange.bulk_cancel(cancel_requests)
-                else:
-                    logging.info("No open orders to cancel.")
+                self.exchange.cancel_all_orders()
             logging.info("Orders cancelled. Exiting.")
         except Exception as e:
             logging.error(f"Error during shutdown: {e}")
-        
-        # Ensure process exit
-        os._exit(0)
+        sys.exit(0)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

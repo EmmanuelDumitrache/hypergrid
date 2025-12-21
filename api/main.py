@@ -202,13 +202,46 @@ async def websocket_dashboard(websocket: WebSocket):
                 try:
                     with open(STATE_PATH, 'r') as f:
                         app_state = json.load(f)
-                except:
-                    pass
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Malformed state.json: {e}. Using empty state.")
+                    app_state = {}
+                except Exception as e:
+                    logger.error(f"Error reading state.json: {e}")
+                    app_state = {}
+            
+            # Provide fallback values for missing fields
+            default_bot_state = {
+                "status": "stopped",
+                "mode": "unknown",
+                "balance": 0,
+                "available_balance": 0,
+                "margin_used": 0,
+                "margin_ratio": 0,
+                "account_value": 0,
+                "equity": 0,
+                "pnl": 0,
+                "pnl_pct": 0,
+                "pnl_daily": 0,
+                "pnl_weekly": 0,
+                "price": 0,
+                "funding_rate": 0,
+                "total_trades": 0,
+                "trades_24h": 0,
+                "win_rate": 0,
+                "active_grids": 0,
+                "total_grids": 0,
+                "positions": [],
+                "open_orders": [],
+                "recent_fills": []
+            }
+            
+            # Merge with defaults, app_state takes precedence
+            bot_state = {**default_bot_state, **proc_status, **app_state}
             
             # Combine
             payload = {
                 "vps": vps_stats,
-                "bot": {**proc_status, **app_state}, 
+                "bot": bot_state,
                 "timestamp": time.time()
             }
             

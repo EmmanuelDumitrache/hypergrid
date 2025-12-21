@@ -1,5 +1,3 @@
-from src.bot import main_entry_point
-
 # Actually, src.bot has the if __name__ == "__main__" logic.
 # But deploy.sh calls main.py.
 # I will make main.py import the bot class and run it, or just symlink.
