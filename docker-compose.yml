@@ -1,6 +1,25 @@
 version: '3.8'
 
 services:
+  bot:
+    build: .
+    container_name: hypergrid_bot
+    restart: unless-stopped
+    command: [ "python3", "binance_bot.py", "--testnet" ]
+    volumes:
+      - ./logs:/app/logs
+      - ./config.json:/app/config.json
+      - ./state.json:/app/state.json
+      - ./.env:/app/.env
+    environment:
+      - BINANCE_API_KEY=${BINANCE_API_KEY}
+      - BINANCE_API_SECRET=${BINANCE_API_SECRET}
+    healthcheck:
+      test: [ "CMD", "pgrep", "-f", "binance_bot.py" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   api:
     build: .
     container_name: hypergrid_api
@@ -8,23 +27,17 @@ services:
     volumes:
       - ./logs:/app/logs
       - ./config.json:/app/config.json
-      # We mount the source code to allow hot edits if needed? 
-      # Better not to for immutable infrastructure, but config.json is essential.
+      - ./state.json:/app/state.json
     environment:
-      - HYPERLIQUID_PRIVATE_KEY=${HYPERLIQUID_PRIVATE_KEY}
+      - BINANCE_API_KEY=${BINANCE_API_KEY}
+      - BINANCE_API_SECRET=${BINANCE_API_SECRET}
 
   ui:
-    # Build UI via Node image first or multi-stage?
-    # For simplicity in this prompt, we assume we just serve build artifacts via Nginx?
-    # Or run vite in dev mode? No, production.
-    # Let's use a standard node builder pattern or just build locally.
-    # To be "Production Ready" we should use a multi-stage Nginx build.
-    build: 
-        context: ./ui
-        dockerfile: Dockerfile
+    build:
+      context: ./ui
+      dockerfile: Dockerfile
     container_name: hypergrid_ui
     ports:
       - "80:80"
     depends_on:
       - api
-

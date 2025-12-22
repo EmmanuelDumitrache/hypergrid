@@ -1,15 +1,20 @@
 {
+    "exchange": "binance",
     "wallet": {
         "secret_key": "YOUR_PRIVATE_KEY_HERE",
         "account_address": "YOUR_ACCOUNT_ADDRESS_HERE"
     },
+    "binance": {
+        "api_key": "YOUR_BINANCE_API_KEY",
+        "api_secret": "YOUR_BINANCE_API_SECRET"
+    },
     "grid": {
-        "pair": "SOL",
+        "pair": "SOLUSDT",
         "capital": 500.0,
-        "leverage": 1.5,
-        "grids": 25,
+        "leverage": 3,
+        "grids": 10,
         "spacing_pct": 0.002,
-        "buffer_pct": 0.30,
+        "buffer_pct": 0.02,
         "mode": "neutral"
     },
     "safety": {
@@ -27,6 +32,7 @@
         }
     },
     "system": {
+        "testnet": true,
         "log_level": "INFO",
         "log_file": "logs/bot.log"
     }

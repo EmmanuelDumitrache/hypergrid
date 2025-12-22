@@ -1,4 +1,7 @@
 hyperliquid-python-sdk
+python-binance>=1.0.19
 python-dotenv
 pandas
 numpy
+colorama
+psutil
