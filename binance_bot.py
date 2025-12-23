@@ -17,6 +17,10 @@ from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
 from colorama import init, Fore, Style
 
+# Advanced Modules
+from src.telegram_bot import TelegramNotifier
+from src.scanner import MarketScanner
+
 # Initialize colorama
 init()
 
@@ -159,6 +163,34 @@ class BinanceGridBot:
             api_secret=api_secret,
             testnet=self.testnet
         )
+        
+        # Initialize Telegram
+        tg_config = self.config.get('telegram', {})
+        if tg_config.get('enabled', False):
+            token = os.getenv('TELEGRAM_TOKEN') or tg_config.get('token')
+            chat_id = os.getenv('TELEGRAM_CHAT_ID') or tg_config.get('chat_id')
+            if token and chat_id and "YOUR_" not in token:
+                self.telegram = TelegramNotifier(token, chat_id)
+                self.telegram.start_polling(self._handle_telegram_command)
+                self.telegram.send_message(f"🤖 *HyperGridBot Started* \nMode: {'TESTNET' if self.testnet else 'LIVE'}\nPair: {self.symbol}")
+                logging.info("Telegram integration active")
+            else:
+                self.telegram = None
+                logging.warning("Telegram enabled but token/chat_id missing or default.")
+        else:
+            self.telegram = None
+            
+        # Initialize Scanner
+        scan_config = self.config.get('scanner', {})
+        if scan_config.get('enabled', False):
+            self.scanner = MarketScanner(
+                exchange_adapter=self.exchange,
+                whitelist=scan_config.get('whitelist', []),
+                check_interval_minutes=scan_config.get('check_interval_minutes', 240)
+            )
+            logging.info("Market Scanner active")
+        else:
+            self.scanner = None
         
         if not self.exchange.connect():
             logging.error("Failed to connect to Binance. Check API credentials.")
@@ -321,10 +353,14 @@ class BinanceGridBot:
         if self.current_balance > self.peak_balance:
             self.peak_balance = self.current_balance
         
+        if self.current_balance <= 0:
+            logging.warning("⚠️ Zero balance detected (possible API error). Skipping drawdown check.")
+            return True
+
         # Check drawdown
         drawdown = (self.peak_balance - self.current_balance) / self.peak_balance
         if drawdown >= self.max_drawdown_pct:
-            logging.error(f"🛑 MAX DRAWDOWN HIT: {drawdown*100:.1f}% loss from peak ${self.peak_balance:.2f}")
+            logging.error(f"🛑 MAX DRAWDOWN HIT: {drawdown*100:.1f}% loss from peak ${self.peak_balance:.2f} (Current: ${self.current_balance:.2f})")
             return False
         return True
     
@@ -354,7 +390,10 @@ class BinanceGridBot:
             self.last_compound_pnl = self.realized_pnl
             
             increase_pct = (self.capital / self.initial_capital - 1) * 100
-            logging.info(f"💎 COMPOUND: +${profit_since_compound:.2f} → Capital now ${self.capital:.2f} (+{increase_pct:.1f}% from start)")
+            msg = f"💎 COMPOUND: +${profit_since_compound:.2f} → Capital now ${self.capital:.2f} (+{increase_pct:.1f}% from start)"
+            logging.info(msg)
+            if self.telegram:
+                self.telegram.send_message(f"🚀 *Compound Event* \n{msg}")
     
     def _all_safety_checks_pass(self) -> bool:
         """Run all safety checks before allowing trades."""
@@ -365,6 +404,9 @@ class BinanceGridBot:
         if not self._check_daily_loss_limit():
             self.paused = True
             return False
+        
+        # Check funding rate periodically
+        self._check_funding_rate()
         
         return True
     
@@ -534,8 +576,13 @@ class BinanceGridBot:
                 self.trade_count += 1
                 
                 emoji = "✅" if profit > 0 else "❌"
+                log_msg = f"{emoji} TRADE #{self.trade_count}: {filled_side.value.upper()} @ ${filled_price:.2f}\n   └─ Profit: ${profit:+.2f} │ Total: ${self.realized_pnl:+.2f}"
                 logging.info(f"{emoji} TRADE #{self.trade_count}: {filled_side.value.upper()} @ ${filled_price:.2f}")
                 logging.info(f"   └─ Profit: ${profit:+.2f} │ Total: ${self.realized_pnl:+.2f}")
+                
+                if self.telegram:
+                    self.telegram.send_message(f"{emoji} *Order Filled*\nPair: `{self.symbol}`\nSide: `{filled_side.value.upper()}`\nPrice: `${filled_price:.2f}`\nProfit: `${profit:+.2f}`")
+
                 
                 # Check for profit compounding
                 self._check_compound_profits()
@@ -622,11 +669,80 @@ class BinanceGridBot:
         print(f"  Mode: {'TESTNET' if self.testnet else 'LIVE'}")
         print(f"  Symbol: {self.symbol}")
         print(f"  Price: ${self.current_price:.2f}")
-        print(f"  Balance: ${self.current_balance:.2f}")
+        print(f"  Lev: {self.leverage}x")
+        print(f"  Eq (Real): ${self.current_balance:.2f}")
+        print(f"  Buy Power: ${self.current_balance * self.leverage:.2f}")
         print(f"  PnL: {pnl_color}${pnl:+.2f} ({pnl_pct:+.2f}%){Style.RESET_ALL}")
         print(f"  Active Orders: {len(self.orders)}")
         print(f"{status_color}═══════════════════════════════════════{Style.RESET_ALL}\n")
     
+    def _try_auto_resume(self):
+        """Attempt to resume bot if market conditions are safe."""
+        # Only try every 5 minutes
+        now = time.time()
+        if not hasattr(self, '_last_resume_check'):
+            self._last_resume_check = 0
+            
+        if now - self._last_resume_check < 300:
+            return
+
+        self._last_resume_check = now
+        
+        # 1. Check volatility
+        vol = self._get_volatility_multiplier()
+        if vol < 1.5: # < 1.5% volatility usually
+             # 2. Check if balance is healthy
+             if self.current_balance > 0:
+                 logging.info(f"✅ Auto-Resume: Volatility safe ({vol:.2f}). Resuming trading.")
+                 self.paused = False
+                 self.paused = False
+                 # Reset panic flags if any
+                 self.state_file_valid = True # Hypothetical flag reset
+
+    def _handle_telegram_command(self, text):
+        """Handle incoming Telegram commands."""
+        cmd = text.lower().strip()
+        
+        if cmd == '/status':
+            pnl, pnl_pct = self._update_balance()
+            return (
+                f"📊 *Status Report*\n"
+                f"Pair: `{self.symbol}`\n"
+                f"Price: `${self.current_price:.2f}`\n"
+                f"PnL: `${pnl:.2f}` ({pnl_pct:.2f}%)\n"
+                f"Pos: `{self.net_position}` | Grids: `{len(self.orders)}`\n"
+                f"State: `{'PAUSED' if self.paused else 'RUNNING'}`"
+            )
+            
+        elif cmd == '/balance':
+            pnl, _ = self._update_balance()
+            return (
+                f"💰 *Balance Info*\n"
+                f"Equity: `${self.current_balance:.2f}`\n"
+                f"Unrealized PnL: `${pnl:.2f}`\n"
+                f"Leverage: `{self.leverage}x`"
+            )
+            
+        elif cmd == '/stop':
+            self.paused = True
+            return "🛑 Bot PAUSED by remote command."
+            
+        elif cmd == '/start':
+            self.paused = False
+            return "▶️ Bot RESUMED by remote command."
+            
+        elif cmd == '/logs':
+            # Read last 10 lines of log file
+            try:
+                log_file = self.config['system'].get('log_file', 'logs/bot.log')
+                with open(log_file, 'r') as f:
+                    lines = f.readlines()[-10:]
+                return "📜 *Recent Logs:*\n" + "".join(lines)
+            except Exception as e:
+                return f"⚠️ Could not read logs: {e}"
+        
+        return None
+
     def console_listener(self):
         """Background thread to listen for console commands."""
         while self.running:
@@ -638,6 +754,34 @@ class BinanceGridBot:
             except Exception:
                 pass
     
+
+
+    def _check_funding_rate(self):
+        """Monitor funding rate to warn about expensive positions."""
+        # Simple timer check (run every 60 mins)
+        now = time.time()
+        if not hasattr(self, '_last_funding_check'):
+            self._last_funding_check = 0
+            
+        if now - self._last_funding_check < 3600:
+            return
+
+        try:
+            funding = self.exchange.client.futures_funding_rate(symbol=self.symbol, limit=1)
+            if funding:
+                rate = float(funding[0]['fundingRate']) * 100
+                self._last_funding_check = now
+                
+                # Warn if expensive
+                if rate > 0.05 and self.net_position > 0:
+                    logging.warning(f"⚠️ HIGH FUNDING RATE: {rate:.4f}%. Paying high fees to hold LONG.")
+                elif rate < -0.05 and self.net_position < 0:
+                    logging.warning(f"⚠️ NEGATIVE FUNDING RATE: {rate:.4f}%. Paying high fees to hold SHORT.")
+                else:
+                    logging.info(f"ℹ️ Funding Rate: {rate:.4f}%")
+        except Exception as e:
+            logging.error(f"Failed to check funding rate: {e}")
+
     def _handle_command(self, cmd: str):
         """Handle console commands."""
         if cmd in ['/status', 'status']:
@@ -655,18 +799,60 @@ class BinanceGridBot:
                 self.switch_pair(new_symbol)
             else:
                 print("Usage: /pair <SYMBOL> (e.g. /pair BTCUSDT)")
+        elif cmd in ['/statistics', '/stats', 'stats']:
+            self.print_statistics()
         elif cmd in ['/clear', 'clear']:
             print("\033c", end="")
         elif cmd in ['/help', 'help', '/commands']:
             print("\nAvailable Commands:")
             print("  /status  - Show bot status")
+            print("  /stats   - Show detailed statistics")
             print("  /start   - Resume trading")
             print("  /stop    - Pause trading")
             print("  /pair [S]- Switch trading pair (e.g. /pair BTCUSDT)")
             print("  /clear   - Clear screen")
             print("  /help    - Show this menu\n")
+
         else:
             print(f"Unknown command: {cmd}")
+
+    def print_statistics(self):
+        """Print detailed session statistics."""
+        elapsed = time.time() - self.session_start_time
+        hours = elapsed / 3600
+        days = hours / 24
+        
+        # Calculations
+        roi_pct = (self.realized_pnl / self.capital) * 100 if self.capital else 0.0
+        trades_per_hour = self.trade_count / hours if hours > 0 else 0
+        avg_profit_trade = self.realized_pnl / self.trade_count if self.trade_count > 0 else 0
+        daily_proj = (self.realized_pnl / hours) * 24 if hours > 0 else 0
+        monthly_proj = daily_proj * 30
+        
+        # Drawdown from peak
+        dd_val = self.peak_balance - self.current_balance
+        dd_pct = (dd_val / self.peak_balance * 100) if self.peak_balance > 0 else 0.0
+        
+        print(f"\n{Fore.CYAN}═══════════════════════════════════════")
+        print(f"  📊 DETAILED STATISTICS ({self.symbol})")
+        print(f"═══════════════════════════════════════{Style.RESET_ALL}")
+        
+        print(f"{Fore.YELLOW}⏱️  Runtime:{Style.RESET_ALL}      {int(hours)}h {int((hours%1)*60)}m")
+        print(f"{Fore.YELLOW}💰 Total Profit:{Style.RESET_ALL} ${self.realized_pnl:+.2f} ({Fore.GREEN}+{roi_pct:.2f}%{Style.RESET_ALL})")
+        print(f"{Fore.YELLOW}📉 Drawdown:{Style.RESET_ALL}     ${dd_val:.2f} ({dd_pct:.2f}%)")
+        print(f"{Fore.YELLOW}🧱 Avg Trade:{Style.RESET_ALL}    ${avg_profit_trade:.2f}")
+        print(f"{Fore.YELLOW}⚡ Velocity:{Style.RESET_ALL}     {trades_per_hour:.1f} trades/hr")
+        
+        print(f"\n{Fore.MAGENTA}🔮 PROJECTIONS:{Style.RESET_ALL}")
+        print(f"   └─ Daily:    ${daily_proj:+.2f} / day")
+        print(f"   └─ Monthly:  ${monthly_proj:+.2f} / month")
+        print(f"   └─ Annual:   ${monthly_proj * 12:+.2f} / year")
+        
+        print(f"\n{Fore.MAGENTA}🛡️  SAFETY HEALTH:{Style.RESET_ALL}")
+        buffer_pts = (self.current_price * self.buffer_pct)
+        print(f"   └─ Position: {self.net_position} SOL (Max: {self.max_position_size})")
+        print(f"   └─ Buffer:   {self.buffer_pct*100}% (${buffer_pts:.2f})")
+        print(f"═══════════════════════════════════════\n")
     
     def switch_pair(self, new_symbol):
         """Switch trading pair dynamically."""
@@ -790,6 +976,8 @@ class BinanceGridBot:
                 time.sleep(10)  # Check every 10 seconds
                 
                 if self.paused:
+                    self._try_auto_resume()
+                    time.sleep(1)
                     continue
                 
                 # Update price
@@ -807,6 +995,16 @@ class BinanceGridBot:
                 else:
                     # Check for fills and replenish
                     self._check_and_replenish()
+
+                # Market Scanner: Check for better pairs
+                if self.scanner:
+                    best_pair = self.scanner.find_best_pair()
+                    if best_pair and best_pair != self.symbol:
+                        logging.info(f"✨ Scanner found better pair: {best_pair}. Switching...")
+                        if self.telegram:
+                            self.telegram.send_message(f"✨ *Market Scanner* \nFound better pair: `{best_pair}`. Switching...")
+                        self.switch_pair(best_pair)
+                        continue # Restart loop with new pair
                 
                 # Update price history for volatility
                 self._update_price_history()
