@@ -26,14 +26,37 @@ class GridManager:
              pass 
         except:
              pass
+             
+        # Initialize Valid Grid Size
+        self.size_per_grid_usd = self._calculate_grid_size()
+
+    def _calculate_grid_size(self):
+        """Calculate grid size with minimum order enforcement"""
+        capital = self.config['grid']['capital']
+        deployed_capital = capital * 0.7 # 70% deployed, 30% reserve
+        total_size_usd = deployed_capital * self.leverage
+        size_per_grid_usd = total_size_usd / self.num_grids
+        
+        # Min Order Size Check (Hyperliquid usually requires ~$10-12 USD)
+        min_order_size = 12.0
+        if size_per_grid_usd < min_order_size:
+            logger.warning(f"Calculated grid size ${size_per_grid_usd:.2f} is below minimum ${min_order_size}!")
+            logger.warning(f"Enforcing minimum size ${min_order_size}. CAUTION: This may increase total position size.")
+            size_per_grid_usd = min_order_size
+            
+        return size_per_grid_usd
 
     def round_to_tick(self, price):
         """Round price to nearest tick size"""
         return round(price / self.tick_size) * self.tick_size
 
-    def set_precision(self, sz_decimals, px_decimals):
+    def set_precision(self, sz_decimals, px_decimals, tick_size=None):
         self.sz_decimals = sz_decimals
         self.px_decimals = px_decimals
+        if tick_size:
+            self.tick_size = tick_size
+            logger.info(f"GridManager precision updated: Size {sz_decimals}, Price {px_decimals}, Tick {tick_size}")
+
 
     def set_manual_range(self, min_price, max_price):
         """Set manual Fixed Range"""
@@ -114,31 +137,8 @@ class GridManager:
         
         orders = []
         
-        # Calculate size per grid
-        # Capital * Leverage / Num Grids?
-        # User config: Capital $500, Leverage 1.5x. Total power $750.
-        # Per grid: $750 / 25 = $30. 
-        # But wait, 30% cash reserve required!
-        # Max deployed = 70% of Capital.
-        # Deployed Capital = $500 * 0.7 = $350.
-        # Total Position Value allowed = $350 * 1.5 (Lev) = $525? 
-        # Or is 30% reserve on the raw capital? usually reserve is on equity.
-        # Start Capital: $500. Reserve $150. Trade with $350.
-        # Leverage 1.5x on $350 ?? Or 1.5x on the whole account but only use 70% margin?
-        # "1.5x ISOLATED margin ONLY".
-        # Let's interpret: Total Max Position Value should not exceed ($500 * 0.70) * Levr? 
-        # Or ($500 * 1.5) * 0.70?
-        # Simpler: Allocation per grid.
-        # Total usable balance = Capital * 0.7.
-        # Size per grid (USD) = (Total Usable * Leverage) / Grids ??
-        # Let's be safe: (Capital * 0.7 * Leverage) / grids.
-        # (500 * 0.7 * 1.5) / 25 = 525 / 25 = $21 USD size per order.
-        
-        capital = self.config['grid']['capital']
-        reserve_ratio = 1.0 - 0.7 # 30% reserve means 70% deployed
-        deployed_capital = capital * 0.7
-        total_size_usd = deployed_capital * self.leverage
-        size_per_grid_usd = total_size_usd / self.num_grids
+        # Use pre-calculated enforced size
+        size_per_grid_usd = self.size_per_grid_usd
         
         logger.info(f"Initializing Grid. Price: {current_price}. Size per grid: ${size_per_grid_usd:.2f}")
 
@@ -185,4 +185,46 @@ class GridManager:
         # Hyperliquid SDK usually supports checking batching.
         
         return orders
+
+    def get_counter_order(self, filled_order):
+        """
+        Generate a counter-order (flip) for a filled order.
+        """
+        fill_price = filled_order['price']
+        is_buy_fill = filled_order['side'] == 'BUY'
+        
+        # Determine Counter Side
+        is_counter_buy = not is_buy_fill
+        
+        # Calculate Counter Price
+        if is_buy_fill:
+             # Filled Buy -> Place Sell higher
+             new_price = fill_price * (1 + self.spacing)
+        else:
+             # Filled Sell -> Place Buy lower
+             new_price = fill_price * (1 - self.spacing)
+             
+        new_price = self.round_to_tick(new_price)
+        
+        # Calculate Size
+        # If we stored size_per_grid_usd, use it. Else roughly infer from fill?
+        # Better to recalculate from capital to keep alignment, or use the filled size if we want to be "neutral" (not really neutral but simple).
+        # Let's try to use stored size if available, else derive.
+        size_usd = getattr(self, 'size_per_grid_usd', 20.0) # Default fallback
+        new_sz_coin = size_usd / new_price
+        
+        sz_fmt = f"{{:.{self.sz_decimals}f}}"
+        px_fmt = f"{{:.{self.px_decimals}f}}"
+        
+        counter_order = {
+            'coin': self.config['grid']['pair'],
+            'is_buy': is_counter_buy,
+            'sz': float(sz_fmt.format(new_sz_coin)),
+            'limit_px': float(px_fmt.format(new_price)),
+            'order_type': {'limit': {'tif': 'Gtc'}},
+            'reduce_only': False
+        }
+        
+        logger.info(f"Generated Counter-Order: {'BUY' if is_counter_buy else 'SELL'} {counter_order['sz']} @ ${counter_order['limit_px']} (Flip from ${fill_price})")
+        return counter_order
 

@@ -1,0 +1,33 @@
+{
+    "api": {
+        "key_env": "BINANCE_API_KEY",
+        "secret_env": "BINANCE_API_SECRET",
+        "testnet": false
+    },
+    "grid": {
+        "symbol": "SOLUSDT",
+        "capital": 700.0,
+        "leverage": 3,
+        "grids": 10,
+        "spacing_pct": 0.002,
+        "buffer_pct": 0.03,
+        "mode": "neutral"
+    },
+    "safety": {
+        "max_drawdown_pct": 0.15,
+        "max_position_size": 25.0,
+        "crash_threshold": 0.05,
+        "daily_loss_limit_usd": 35.0,
+        "stop_loss_pct": 0.10,
+        "take_profit_pct": 0.20
+    },
+    "compounding": {
+        "enabled": true,
+        "compound_threshold": 5.0,
+        "compound_pct": 1.0
+    },
+    "logging": {
+        "level": "INFO",
+        "file": "logs/bot_live.log"
+    }
+}
