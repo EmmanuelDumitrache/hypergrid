@@ -1,12 +1,37 @@
+# Dependencies
 ui/node_modules/
 node_modules/
 venv/
 __pycache__/
 *.pyc
+
+# Logs and state
 logs/
-.DS_Store
 *.log
 state.json
+
+# Config with secrets
 config.json
 test_config.json
+config_fast.json
+live_safe_config.json
+
+# Environment
 .env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Deployment scripts with IPs
+deploy.sh
+deploy_pro.sh
+deploy_docker.sh
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# User data
+user_data/

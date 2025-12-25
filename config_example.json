@@ -1,39 +1,29 @@
 {
-    "exchange": "binance",
-    "wallet": {
-        "secret_key": "YOUR_PRIVATE_KEY_HERE",
-        "account_address": "YOUR_ACCOUNT_ADDRESS_HERE"
-    },
-    "binance": {
-        "api_key": "YOUR_BINANCE_API_KEY",
-        "api_secret": "YOUR_BINANCE_API_SECRET"
-    },
     "grid": {
-        "pair": "SOLUSDT",
-        "capital": 500.0,
+        "pair": "BNBUSDT",
+        "capital": 2000,
         "leverage": 3,
-        "grids": 10,
-        "spacing_pct": 0.002,
+        "grids": 5,
+        "spacing_pct": 0.001,
         "buffer_pct": 0.02,
-        "mode": "neutral"
+        "preset": "NEUTRAL"
     },
     "safety": {
         "max_drawdown_pct": 0.10,
-        "daily_loss_limit_usd": 50.0,
-        "min_margin_ratio": 1.5,
-        "max_adverse_funding_rate": 0.001,
-        "email_alerts": {
-            "enabled": false,
-            "smtp_server": "smtp.gmail.com",
-            "smtp_port": 587,
-            "sender_email": "your_email@gmail.com",
-            "sender_password": "your_app_password",
-            "recipient_email": "alert_recipient@example.com"
-        }
+        "max_position_sol": 20.0,
+        "crash_threshold_pct": 0.05,
+        "daily_loss_limit_usd": 50.0
+    },
+    "telegram": {
+        "enabled": false,
+        "token": "",
+        "chat_id": ""
+    },
+    "scanner": {
+        "enabled": false
     },
     "system": {
-        "testnet": true,
-        "log_level": "INFO",
-        "log_file": "logs/bot.log"
+        "log_file": "logs/bot.log",
+        "log_level": "INFO"
     }
 }

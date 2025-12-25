@@ -5,3 +5,6 @@ pandas
 numpy
 colorama
 psutil
+requests
+cryptography
+supabase

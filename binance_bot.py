@@ -12,6 +12,8 @@ import logging
 import argparse
 import threading
 import select
+import sys
+import subprocess
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from dotenv import load_dotenv
@@ -20,6 +22,7 @@ from colorama import init, Fore, Style
 # Advanced Modules
 from src.telegram_bot import TelegramNotifier
 from src.scanner import MarketScanner
+from src.websocket_manager import WebSocketManager
 
 # Initialize colorama
 init()
@@ -52,19 +55,33 @@ def setup_logging(config):
             log_fmt = self.FORMATS.get(record.levelno, self.FORMATS[logging.INFO])
             formatter = logging.Formatter(log_fmt, datefmt='%H:%M:%S')
             return formatter.format(record)
+
+    # Filter out keepalive noise
+    class KeepAliveFilter(logging.Filter):
+        def filter(self, record):
+            return "keepalive_socket" not in record.getMessage()
+
+    keep_alive_filter = KeepAliveFilter()
     
     # File handler with rotation (no colors) - 5MB max, keep 3 backups
     file_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3)
     file_handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+    file_handler.addFilter(keep_alive_filter)
     
     # Console handler (with colors)
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(ColorFormatter())
+    console_handler.addFilter(keep_alive_filter)
     
     logging.basicConfig(
         level=getattr(logging, log_level.upper()),
         handlers=[file_handler, console_handler]
     )
+    
+    # Silence noisy libraries
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("binance").setLevel(logging.ERROR)
+    logging.getLogger("binance.websocket").setLevel(logging.CRITICAL)
 
 
 class BinanceGridBot:
@@ -73,6 +90,13 @@ class BinanceGridBot:
     Places buy orders below current price and sell orders above.
     When orders fill, replaces them on the opposite side.
     """
+    
+    # Trading presets for different risk profiles
+    PRESETS = {
+        "NEUTRAL": {"grids": 5, "spacing_pct": 0.0010, "leverage": 3},
+        "ULTRA_SAFE": {"grids": 3, "spacing_pct": 0.0020, "leverage": 2},
+        "AGGRESSIVE": {"grids": 8, "spacing_pct": 0.0005, "leverage": 5},
+    }
     
     def __init__(self, config: dict, testnet: bool = True):
         self.config = config
@@ -88,6 +112,7 @@ class BinanceGridBot:
         self.num_grids = int(grid_config.get('grids', 10))  # More grids = more trades
         self.spacing_pct = float(grid_config.get('spacing_pct', 0.002))  # 0.2% = ~$0.25 per level for micro trades
         self.buffer_pct = float(grid_config.get('buffer_pct', 0.02))    # 2% buffer for auto-range
+        self.current_preset = grid_config.get('preset', 'NEUTRAL')  # Active preset name
         
         # State
         self.orders = []
@@ -119,6 +144,7 @@ class BinanceGridBot:
         
         # Position tracking
         self.net_position = 0.0  # Net SOL position (positive = long, negative = short)
+        self.avg_entry_price = 0.0 # Average entry price for unrealized PnL
         self.position_value = 0.0  # USD value of position
         self.peak_balance = 0.0  # For drawdown calculation
         self.crash_price_base = 0.0  # Price when started, for crash detection
@@ -171,8 +197,13 @@ class BinanceGridBot:
             chat_id = os.getenv('TELEGRAM_CHAT_ID') or tg_config.get('chat_id')
             if token and chat_id and "YOUR_" not in token:
                 self.telegram = TelegramNotifier(token, chat_id)
-                self.telegram.start_polling(self._handle_telegram_command)
+                self.telegram.start_polling(
+                    self._handle_telegram_command, 
+                    self._handle_telegram_callback,
+                    self._handle_telegram_text
+                )
                 self.telegram.send_message(f"🤖 *HyperGridBot Started* \nMode: {'TESTNET' if self.testnet else 'LIVE'}\nPair: {self.symbol}")
+                self.telegram.send_main_menu()  # Show control panel with buttons
                 logging.info("Telegram integration active")
             else:
                 self.telegram = None
@@ -191,6 +222,9 @@ class BinanceGridBot:
             logging.info("Market Scanner active")
         else:
             self.scanner = None
+            
+        self.ws_manager = None
+        self.last_price_update = time.time()
         
         if not self.exchange.connect():
             logging.error("Failed to connect to Binance. Check API credentials.")
@@ -331,6 +365,52 @@ class BinanceGridBot:
         self.crash_price_base = self.crash_price_base * 0.99 + self.current_price * 0.01
         return False
     
+    def set_preset(self, preset_name: str) -> bool:
+        """Apply a trading preset and recenter grid."""
+        if preset_name not in self.PRESETS:
+            logging.error(f"Unknown preset: {preset_name}. Available: {list(self.PRESETS.keys())}")
+            return False
+        
+        preset = self.PRESETS[preset_name]
+        self.num_grids = preset['grids']
+        self.spacing_pct = preset['spacing_pct']
+        self.leverage = preset['leverage']
+        self.current_preset = preset_name
+        
+        # Apply leverage to exchange
+        try:
+            self.exchange.set_leverage(self.symbol, self.leverage)
+            logging.info(f"🎚 Preset changed to {preset_name}: Grids={self.num_grids}, Spacing={self.spacing_pct*100:.2f}%, Leverage={self.leverage}x")
+            
+            # Recenter grid with new settings
+            self._recenter_grid()
+            return True
+        except Exception as e:
+            logging.error(f"Failed to apply preset {preset_name}: {e}")
+            return False
+    
+    def _calculate_liquidation_price(self) -> float:
+        """Calculate estimated liquidation price based on position and leverage."""
+        if self.net_position <= 0 or self.avg_entry_price <= 0:
+            return 0.0
+        # For long position: liq_price ≈ entry * (1 - 1/leverage + maintenance_margin)
+        # Simplified: liq_price ≈ entry * (1 - 0.9/leverage) accounting for ~10% buffer
+        return self.avg_entry_price * (1 - 0.9 / self.leverage)
+    
+    def _check_liquidation_risk(self) -> bool:
+        """Check if current price is approaching liquidation. Returns True if at risk."""
+        liq_price = self._calculate_liquidation_price()
+        if liq_price <= 0:
+            return False
+        
+        distance_pct = (self.current_price - liq_price) / self.current_price
+        if distance_pct < 0.10:  # Within 10% of liquidation
+            logging.warning(f"🚨 LIQUIDATION RISK! Price ${self.current_price:.2f} is {distance_pct*100:.1f}% from liquidation @ ${liq_price:.2f}")
+            return True
+        elif distance_pct < 0.20:  # Within 20% - warning
+            logging.warning(f"⚠️ Liquidation distance: {distance_pct*100:.1f}% (Liq @ ${liq_price:.2f})")
+        return False
+    
     def _check_position_limit(self, side: OrderSide, quantity: float) -> bool:
         """Check if placing this order would exceed position limits."""
         if side == OrderSide.BUY:
@@ -414,8 +494,9 @@ class BinanceGridBot:
         """Generate grid orders with tiered sizing - small for micro trades, larger for big moves."""
         orders = []
         
-        # Calculate base order size
-        total_capital_usd = self.capital * self.leverage
+        # Calculate base order size with 15% margin safety factor
+        # This prevents "Margin is insufficient" errors by reserving headroom
+        total_capital_usd = self.capital * self.leverage * 0.85  # 15% safety margin
         base_qty = (total_capital_usd / self.num_grids) / center_price
         
         # Apply volatility multiplier to base
@@ -727,9 +808,10 @@ class BinanceGridBot:
             self.paused = True
             return "🛑 Bot PAUSED by remote command."
             
-        elif cmd == '/start':
-            self.paused = False
-            return "▶️ Bot RESUMED by remote command."
+        elif cmd == '/start' or cmd == '/menu':
+            if self.telegram:
+                self.telegram.send_main_menu()
+            return None
             
         elif cmd == '/logs':
             # Read last 10 lines of log file
@@ -740,6 +822,148 @@ class BinanceGridBot:
                 return "📜 *Recent Logs:*\n" + "".join(lines)
             except Exception as e:
                 return f"⚠️ Could not read logs: {e}"
+        
+        return None
+
+    def _handle_telegram_callback(self, callback_data):
+        """Handle inline keyboard button presses from Telegram."""
+        
+        if callback_data == "status":
+            unrealized = (self.current_price - self.avg_entry_price) * self.net_position if self.net_position else 0
+            total = self.realized_pnl + unrealized
+            return (
+                f"📊 *Status Report*\n"
+                f"Pair: `{self.symbol}`\n"
+                f"Price: `${self.current_price:.2f}`\n"
+                f"Total PnL: `${total:+.2f}`\n"
+                f"Preset: `{self.current_preset}`\n"
+                f"State: `{'PAUSED' if self.paused else 'RUNNING'}`"
+            )
+        
+        elif callback_data == "pnl":
+            unrealized = (self.current_price - self.avg_entry_price) * self.net_position if self.net_position else 0
+            total = self.realized_pnl + unrealized
+            return (
+                f"💰 *PnL Breakdown*\n"
+                f"Realized: `${self.realized_pnl:+.2f}`\n"
+                f"Unrealized: `${unrealized:+.2f}`\n"
+                f"*Total: `${total:+.2f}`*\n"
+                f"Position: `{self.net_position}` | Trades: `{self.trade_count}`"
+            )
+        
+        elif callback_data == "pause":
+            self.paused = True
+            return "⏸ *Bot PAUSED*\nTrading halted. Use Resume to continue."
+        
+        elif callback_data == "resume":
+            self.paused = False
+            return "▶️ *Bot RESUMED*\nTrading active."
+        
+        elif callback_data == "preset_menu":
+            if self.telegram:
+                self.telegram.send_preset_menu()
+            return None
+        
+        elif callback_data.startswith("preset_"):
+            preset_name = callback_data.replace("preset_", "")
+            if self.set_preset(preset_name):
+                return f"✅ Preset changed to *{preset_name}*\nGrid recentered."
+            else:
+                return f"❌ Failed to set preset: {preset_name}"
+        
+        elif callback_data == "main_menu":
+            if self.telegram:
+                self.telegram.send_main_menu()
+            return None
+        
+        elif callback_data == "help":
+            return (
+                "❓ *HyperGridBot Help*\n\n"
+                "📊 *Status* - Current price, PnL, state\n"
+                "📈 *PnL* - Detailed profit breakdown\n"
+                "⏸ *Pause* - Stop trading (keeps positions)\n"
+                "▶️ *Resume* - Resume trading\n"
+                "🎚 *Preset* - Change strategy\n"
+                "  • NEUTRAL: Balanced\n"
+                "  • ULTRA_SAFE: Conservative\n"
+                "  • AGGRESSIVE: High risk/reward"
+            )
+        
+        elif callback_data == "custom_menu":
+            if self.telegram:
+                self.telegram.send_custom_menu()
+            return None
+        
+        elif callback_data == "custom_leverage":
+            if self.telegram:
+                self.telegram.set_user_state(chat_id, self.telegram.STATE_AWAITING_LEVERAGE)
+            return "📊 *Set Custom Leverage*\n\nEnter a value between 1 and 10:"
+        
+        elif callback_data == "custom_grids":
+            if self.telegram:
+                self.telegram.set_user_state(chat_id, self.telegram.STATE_AWAITING_GRIDS)
+            return "📈 *Set Grid Count*\n\nEnter a value between 3 and 20:"
+        
+        elif callback_data == "custom_spacing":
+            if self.telegram:
+                self.telegram.set_user_state(chat_id, self.telegram.STATE_AWAITING_SPACING)
+            return "📏 *Set Spacing %*\n\nEnter a value between 0.05 and 1.0 (e.g., 0.15 for 0.15%):"
+        
+        elif callback_data.startswith("pair_"):
+            pair = callback_data.replace("pair_", "")
+            if pair in ["BNBUSDT", "SOLUSDT", "ETHUSDT"]:
+                self.symbol = pair
+                return f"✅ Trading pair changed to *{pair}*"
+            return "❌ Invalid pair"
+        
+        return None
+
+    def _handle_telegram_text(self, chat_id, text, state, data):
+        """Handle multi-step text input for custom settings."""
+        from src.telegram_bot import TelegramNotifier
+        
+        if state == TelegramNotifier.STATE_AWAITING_LEVERAGE:
+            try:
+                leverage = int(text.strip())
+                if 1 <= leverage <= 10:
+                    self.leverage = leverage
+                    self.exchange.set_leverage(self.symbol, leverage)
+                    self._recenter_grid()
+                    if self.telegram:
+                        self.telegram.clear_user_state(chat_id)
+                    return f"✅ Leverage set to *{leverage}x*\nGrid recentered."
+                else:
+                    return "❌ Leverage must be between 1 and 10. Try again:"
+            except ValueError:
+                return "❌ Please enter a valid number (1-10):"
+        
+        elif state == TelegramNotifier.STATE_AWAITING_GRIDS:
+            try:
+                grids = int(text.strip())
+                if 3 <= grids <= 20:
+                    self.num_grids = grids
+                    self._recenter_grid()
+                    if self.telegram:
+                        self.telegram.clear_user_state(chat_id)
+                    return f"✅ Grid count set to *{grids}*\nGrid recentered."
+                else:
+                    return "❌ Grid count must be between 3 and 20. Try again:"
+            except ValueError:
+                return "❌ Please enter a valid number (3-20):"
+        
+        elif state == TelegramNotifier.STATE_AWAITING_SPACING:
+            try:
+                spacing = float(text.strip())
+                if 0.05 <= spacing <= 1.0:
+                    self.spacing_pct = spacing / 100  # Convert to decimal
+                    self._recenter_grid()
+                    if self.telegram:
+                        self.telegram.clear_user_state(chat_id)
+                    return f"✅ Spacing set to *{spacing}%*\nGrid recentered."
+                else:
+                    return "❌ Spacing must be between 0.05 and 1.0. Try again:"
+            except ValueError:
+                return "❌ Please enter a valid number (e.g., 0.15):"
         
         return None
 
@@ -934,111 +1158,191 @@ class BinanceGridBot:
         sys.exit(0)
     
     def run(self):
-        """Main bot loop."""
-        logging.info(f"Starting BinanceGridBot on {self.symbol}...")
+        """Main execution method (Event-Driven via WebSockets)."""
+        logging.info(f"🚀 Starting BinanceGridBot on {self.symbol}...")
+        logging.info(f"   └─ Capital: ${self.capital} (Leverage: {self.leverage}x)")
+        logging.info(f"   └─ Grids: {self.num_grids} (Spacing: {self.spacing_pct*100:.2f}%)")
         
-        # Start console listener
-        listener = threading.Thread(target=self.console_listener, daemon=True)
-        listener.start()
-        
-        # Set leverage
+        # Initial Balance & Grid
         self._set_leverage()
-        
-        # Get market info
         self._get_market_info()
-        
-        # Initial balance
-        pnl, _ = self._update_balance()
-        self.peak_balance = self.current_balance
-        logging.info(f"Starting balance: ${self.current_balance:.2f}")
-        
-        # Show trade economics
-        notional_per_trade = self.capital * self.leverage / self.num_grids
-        margin_per_trade = notional_per_trade / self.leverage
-        expected_profit_per_trade = notional_per_trade * self.spacing_pct
-        logging.info(f"📊 Trade Economics:")
-        logging.info(f"   └─ Capital: ${self.capital:.0f} │ Leverage: {self.leverage}x │ Notional: ${notional_per_trade:.0f}/trade")
-        logging.info(f"   └─ Margin: ${margin_per_trade:.0f}/trade │ Expected profit: ${expected_profit_per_trade:.2f}/round-trip")
-        
-        # Initialize session
-        self.session_start_time = time.time()
-        
+
         # Place initial grid
         if not self._place_initial_grid():
             logging.error("Failed to place initial grid. Exiting.")
             return
         
+        self.last_status_time = time.time()
         self.print_status()
         
-        # Main loop
-        while self.running:
-            try:
-                time.sleep(10)  # Check every 10 seconds
+        # Start WebSockets
+        self.ws_manager = WebSocketManager(
+            self.exchange.api_key, 
+            self.exchange.api_secret, 
+            testnet=self.exchange.testnet
+        )
+        self.ws_manager.start(
+            self.symbol, 
+            self._on_price_update, 
+            self._on_user_update
+        )
+        
+        try:
+            while self.running:
+                # Keep main thread alive
+                time.sleep(10)
                 
-                if self.paused:
-                    self._try_auto_resume()
+                # Check for stale connection (Heartbeat) - 60s
+                if time.time() - self.last_price_update > 60:
+                    logging.warning("⚠️ No price updates for 60s! Reconnecting WebSockets...")
+                    self.ws_manager.stop()
                     time.sleep(1)
-                    continue
-                
-                # Update price
-                self.current_price = self.exchange.get_mark_price(self.symbol)
-                
-                # Run safety checks
-                if not self._all_safety_checks_pass():
-                    logging.warning("⚠️ SAFETY: Trading paused due to risk limits")
-                    continue
-                
-                # Check for auto-range rebalancing
-                if self.current_price > self.grid_upper or self.current_price < self.grid_lower:
-                    logging.warning(f"🔄 Price ${self.current_price:.2f} outside range! Rebalancing grid...")
-                    self._place_initial_grid()
-                else:
-                    # Check for fills and replenish
-                    self._check_and_replenish()
+                    self.ws_manager.start(self.symbol, self._on_price_update, self._on_user_update)
+                    self.last_price_update = time.time()
 
-                # Market Scanner: Check for better pairs
-                if self.scanner:
-                    best_pair = self.scanner.find_best_pair()
-                    if best_pair and best_pair != self.symbol:
-                        logging.info(f"✨ Scanner found better pair: {best_pair}. Switching...")
-                        if self.telegram:
-                            self.telegram.send_message(f"✨ *Market Scanner* \nFound better pair: `{best_pair}`. Switching...")
-                        self.switch_pair(best_pair)
-                        continue # Restart loop with new pair
+                # Periodic Status Log (every 5 minutes)
+                if time.time() - self.last_status_time > 300:
+                    try:
+                        # Local PnL Calculation (Est.)
+                        unrealized_pnl = 0.0
+                        if self.net_position != 0 and self.avg_entry_price:
+                            unrealized_pnl = (self.current_price - self.avg_entry_price) * self.net_position
+                        
+                        lower_bound = min([o['price'] for o in self.order_map.values()], default=0)
+                        upper_bound = max([o['price'] for o in self.order_map.values()], default=0)
+                        
+                        # Total PnL
+                        total_pnl = self.realized_pnl + unrealized_pnl
+                        
+                        status_msg = (
+                            f"🕒 STATUS | {self.symbol}: ${self.current_price:.2f} | "
+                            f"📊 Total: ${total_pnl:+.2f} | "
+                            f"💰 Real: ${self.realized_pnl:+.2f} | "
+                            f"📉 Unreal: ${unrealized_pnl:+.2f} | "
+                            f"💼 Pos: {self.net_position} | "
+                            f"� {self.current_preset}"
+                        )
+                        logging.info(status_msg)
+                        self.last_status_time = time.time()
+                        
+                        # Check liquidation risk
+                        self._check_liquidation_risk()
+                        
+                        # Auto-Recenter Logic (Infinite Grid)
+                        # If price deviates significantly from grid range (e.g. out of bounds > spacing)
+                        # We cancel all and Reset.
+                        # Buffer: use 2x spacing as buffer to avoid jitter at edges
+                        buffer = (upper_bound - lower_bound) / self.num_grids # rough spacing
+                        
+                        if self.current_price > upper_bound + buffer or self.current_price < lower_bound - buffer:
+                            logging.info(f"🔄 Price ${self.current_price:.2f} out of range (${lower_bound:.2f}-${upper_bound:.2f}). Auto-Recentering...")
+                            self._recenter_grid()
+
+                    except Exception as e:
+                        logging.error(f"Status log error: {e}")
+
+        except KeyboardInterrupt:
+            self.shutdown()
+        except Exception as e:
+            logging.error(f"Critical error in main loop: {e}")
+            # Auto-restart on critical websocket failure
+            self.shutdown() 
+            time.sleep(5)
+            os.execv(sys.executable, ['python3'] + sys.argv)
+
+    def _recenter_grid(self):
+        """Cancel all orders and place a new grid around current price."""
+        try:
+            # 1. Cancel All
+            logging.info("   └─ Cancelling all open orders...")
+            self.exchange.cancel_all_orders(self.symbol)
+            self.order_map = {}
+            
+            # 2. Dynamic Compounding: Use Realized Profit
+            # We assume initial capital was what we started with. 
+            # We add realized PnL to logic capital for sizing.
+            # (Note: real balance check would be safer, but we are avoiding API calls)
+            # self.capital is updated for the sizing logic
+            current_equity_est = self.initial_capital + self.realized_pnl
+            if current_equity_est > self.capital:
+                logging.info(f"   └─ Compounding: Increasing capital base from ${self.capital:.2f} to ${current_equity_est:.2f}")
+                self.capital = current_equity_est
+            
+            # 3. Re-Calculate and Place Grid
+            # The _place_initial_grid status method will use self.capital and self.current_price
+            if self._place_initial_grid():
+                logging.info("   └─ ✅ Grid successfully recentered!")
+            else:
+                logging.error("   └─ ❌ Failed to recenter grid.")
+        except Exception as e:
+            logging.error(f"failed to recenter grid: {e}")
+
+    def _on_price_update(self, price):
+        """Callback for real-time price updates from WebSocket."""
+        self.current_price = price
+        self.last_price_update = time.time()
+        # Note: We rely on Order Updates for trading logic, not price ticks.
+
+    def _on_user_update(self, type, data):
+        """Callback for order/account updates from WebSocket."""
+        if type == 'ORDER':
+            # data is the 'o' object from Binance stream
+            status = data.get('X') # Order Status
+            side = data.get('S')   # BUY or SELL
+            
+            if status == 'FILLED':
+                fill_price = float(data.get('L')) # Last filled price
+                qty = float(data.get('l'))        # Last filled qty
+                logging.info(f"🔔 {side} FILLED @ ${fill_price} ({qty} {self.symbol})")
                 
-                # Update price history for volatility
-                self._update_price_history()
+                # Update stats
+                self.trade_count += 1
                 
-                # Update and log status
-                pnl, pnl_pct = self._update_balance()
+                # Place Counter Order Immediately
+                self._handle_fill_event(side, fill_price, qty)
                 
-                # Count buys and sells
-                buys = sum(1 for o in self.order_map.values() if o['side'] == OrderSide.BUY)
-                sells = sum(1 for o in self.order_map.values() if o['side'] == OrderSide.SELL)
+        elif type == 'ACCOUNT':
+            # Optionally update balance here if needed
+            pass 
+
+    def _handle_fill_event(self, side, price, qty):
+        """React to a fill by placing a counter-order and updating PnL."""
+        # Simple logic: If BUY filled, place SELL higher. If SELL filled, place BUY lower.
+        spacing = price * self.spacing_pct
+        
+        # Calculate approximate realized profit from this grid cycle
+        # We assume if we Sell, we sold something we bought lower.
+        # If we Buy, we are loading up for a future sell.
+        # Strict grid PnL is realized on the closing leg.
+        # For simplicity in this event loop: 
+        # Every matched pair (Buy+Sell) generates profit = price * spacing_pct.
+        # We count profit on the SELL side for Long grids, or logic based on reducing pos.
+        # Let's just track "Grid Profit" as (Value * Spacing) whenever a trade happens, 
+        # as it represents capturing a spread.
+        trade_profit = (price * qty) * self.spacing_pct
+        self.realized_pnl += trade_profit
+        
+        try:
+            if side == 'BUY':
+                # Place Sell
+                sell_price = price + spacing
+                self.exchange.place_limit_order(self.symbol, OrderSide.SELL, qty, sell_price)
+                logging.info(f"   └─ Placed Counter SELL @ ${sell_price:.2f}")
                 
-                # Calculate drawdown
-                if self.peak_balance > 0:
-                    drawdown = (self.peak_balance - self.current_balance) / self.peak_balance * 100
-                else:
-                    drawdown = 0
-                
-                # Position info
-                pos_str = f"Pos: {self.net_position:+.1f}" if abs(self.net_position) > 0.1 else "Pos: 0"
-                
-                # Compounded capital info
-                if self.capital > self.initial_capital:
-                    cap_pct = (self.capital / self.initial_capital - 1) * 100
-                    cap_str = f"Cap: ${self.capital:.0f} (+{cap_pct:.0f}%)"
-                else:
-                    cap_str = ""
-                
-                logging.info(f"💰 ${self.current_price:.2f} │ T:{self.trade_count} │ PnL: ${self.realized_pnl:+.2f} │ {pos_str} │ 📉{buys} 📈{sells}")
-                
-            except KeyboardInterrupt:
-                self.shutdown()
-            except Exception as e:
-                logging.error(f"Loop error: {e}")
-                time.sleep(5)
+            elif side == 'SELL':
+                # Place Buy
+                buy_price = price - spacing
+                self.exchange.place_limit_order(self.symbol, OrderSide.BUY, qty, buy_price)
+                logging.info(f"   └─ Placed Counter BUY @ ${buy_price:.2f}")
+        except Exception as e:
+            logging.error(f"Failed to place counter order: {e}")
+
+    def shutdown(self, signum=None, frame=None):
+        self.running = False
+        if self.ws_manager:
+            self.ws_manager.stop()
+        logging.info("Shutdown complete.")
+        sys.exit(0)
 
 
 def main():
